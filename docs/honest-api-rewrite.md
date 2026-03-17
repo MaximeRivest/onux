@@ -191,8 +191,11 @@ A Program composes a configured module and a configured runner:
 
 ```python
 program = Program(
-    predict.hint("Read carefully.").via("reasoning"),
-    OpenAILM("gpt-4o").temperature(0.0).adapter(XMLAdapter()),
+    chain_of_thought.hint(
+        "Distinguish billing issues from product bugs or feature requests. "
+        "Use urgency only to choose severity, not team."
+    ),
+    OpenAILM("gpt-4o", temperature=0.0),
 )
 
 result = program(triage, {"support_request": "I was charged twice."})
@@ -212,19 +215,39 @@ belongs to the object it configures:
 module types expose different builder methods:
 
 ```python
-# chain_of_thought knows about: hint, via
-chain_of_thought 
-    .hint("extract taxes form this receipt")
-    .via('number_list',  "list ALL numerical values in this receipt")
+# chain_of_thought knows about: hint, and optionally extra hidden decomposition
+# It already owns its internal reasoning decomposition.
+chain_of_thought.hint(
+    "Extract every monetary amount on the receipt, identify subtotal, tax, "
+    "and total, then compute before_tax and after_tax exactly. Do not invent values."
+).via(
+    "number_list",
+    List[float],
+    note="All numeric values visible on the receipt, preserving currency symbols and nearby labels"
+)
 
-# react knows about: hint, via, tools, max_iter
-react.tools([search, calc]).max_iter(5).hint("you task is to X careful about Y")
+# Another meaningful decomposition: separate evidence gathering from the final answer.
+chain_of_thought.hint(
+    "Decide whether the support issue belongs to billing, bug, feature, or account before assigning severity."
+).via(
+    "issue_category_evidence",
+    note="Short evidence for the most likely team label"
+)
+
+# react knows about: tools, max_iter, hint, and can expose extra working state
+react.tools([search_docs, lookup_pricing]).max_iter(5).hint(
+    "Check the docs for the exact API version first, then answer only from retrieved facts."
+).via(
+    "retrieved_facts",
+    note="Facts gathered from tools that may be cited in the final answer"
+)
 
 # refine knows about: check, max_retries
-refine.check(my_validator).max_retries(3)
+refine.check(sql_is_safe).max_retries(3)
 
-# predict knows about: hint (and little else)
-predict.hint("Be concise.")
+# predict knows about: hint and prompt-side field notes
+predict.hint("Return only the final label and confidence.") \
+       .field_note("confidence", "Probability from 0 to 1")
 ```
 
 **Runner config** — the execution engine's own parameters. Different
@@ -272,10 +295,10 @@ Each object only exposes the methods that make sense for its type:
 
 | You type...                   | IDE shows...                    |
 |-------------------------------|---------------------------------|
-| `chain_of_thought.`           | `hint`, `via`   (with reasoning via pre-specified)                |
+| `chain_of_thought.`           | `hint`, `via` |
 | `react.`                      | `hint`, `via`, `tools`, `max_iter` |
 | `refine.`                     | `check`, `max_retries`          |
-| `predict.`                    | `hint`, `via`                          |
+| `predict.`                    | `hint`, `field_note`            |
 | `OpenAILM("gpt-4o").`        | `temperature`, `max_tokens`, `adapter`, ... |
 | `YOLORunner("yolov8x.pt").`  | `conf_thresh`, `iou_thresh`, `device`, ... |
 | `SklearnRunner("model.joblib").` | (nothing to configure)       |
@@ -308,20 +331,27 @@ compose freely:
 
 ```python
 # Shared strategy, different runners
-cot = chain_of_thought.hint("Think step by step.").via("reasoning")
+cot = chain_of_thought.hint(
+    "Decide team from the user's underlying issue, then decide severity from urgency and business impact."
+)
 fast = Program(cot, OpenAILM("gpt-4o-mini"))
 accurate = Program(cot, OpenAILM("o1"))
 
 # Shared runner, different strategies
 lm = OpenAILM("gpt-4o", temperature=0.0)
 simple = Program(predict, lm)
-reasoned = Program(chain_of_thought.hint("Think carefully."), lm)
-agent = Program(react.tools([search, calculator]), lm)
+reasoned = Program(
+    chain_of_thought.hint(
+        "Separate issue type, urgency, and customer visibility before emitting the final fields."
+    ),
+    lm,
+)
+agent = Program(react.tools([search_docs, calculator]), lm)
 
 # Progressive refinement of a module
-v1 = chain_of_thought.hint("Think step by step.")
-v2 = v1.via("evidence", note="Supporting facts")
-v3 = v2.hint("Cite evidence, then answer.")  # replaces the hint
+v1 = predict.hint("Return only the final classification fields.")
+v2 = v1.field_note("confidence", "Probability from 0 to 1")
+v3 = v2.hint("Return only the final fields. Do not explain your reasoning.")
 
 # Compose into Programs
 prog_v1 = Program(v1, lm)
@@ -335,12 +365,14 @@ This mirrors how Signature authoring works:
 sig = Signature("question -> answer").type(answer=str).examples([...])
 
 # Strategy builder
-mod = chain_of_thought.hint("Think step by step.").via("reasoning")
+mod = chain_of_thought.hint(
+    "Work through the arithmetic before giving the final answer."
+)
 run = OpenAILM("gpt-4o", temperature=0.0)
 
 # Compose
 program = Program(mod, run)
-result = program(sig, {"question": "What is 2+2?"})
+result = program(sig, {"question": "What is 17 * 24?"})
 ```
 
 Three immutable builders — Signature, module, runner — each configured
@@ -353,7 +385,11 @@ binding of module-to-intent that becomes executable when a runner is
 bound:
 
 ```python
-strategy = Program(chain_of_thought.hint("Think carefully.").via("reasoning"))
+strategy = Program(
+    chain_of_thought.hint(
+        "Identify the issue category first, then map urgency to severity."
+    )
+)
 
 # Bind to different runners
 for_triage = strategy.runner(OpenAILM("gpt-4o", temperature=0.0))
@@ -394,29 +430,34 @@ builder.
 
 ### Module types
 
-Each module type is a builder that knows its own configurable axes:
+Each module type is a builder that knows its own configurable axes.
+The module owns its default internal decomposition; users configure the
+module's behavior, not its implementation details.
 
 ```python
 # LM strategy modules
 predict                                           # single call
-predict.hint("Be concise.")                       # with guidance
+predict.hint("Return only the label and confidence.")
+predict.field_note("confidence", "Probability from 0 to 1")
 
-chain_of_thought                                  # adds reasoning
-chain_of_thought.hint("Think step by step.")      # with guidance
-chain_of_thought.via("reasoning")                 # explicit decomposition
-chain_of_thought.via("reasoning").via("evidence")  # multiple hidden fields
+chain_of_thought                                  # reasoning is built in
+chain_of_thought.hint(
+    "Work through the tax calculation carefully and only then produce the final amounts."
+)
 
-react                                             # tool loop
-react.tools([search, calc])                       # with tools
-react.tools([search]).max_iter(5)                 # with iteration limit
-react.tools([search]).hint("Use tools wisely.")   # with guidance
+react                                             # tool loop is built in
+react.tools([search_docs, lookup_pricing])
+react.tools([search_docs]).max_iter(5)
+react.tools([search_docs]).hint(
+    "Look up the exact API behavior in the docs before answering."
+)
 
-refine                                            # validation loop
-refine.check(my_validator)                        # with check function
-refine.check(my_validator).max_retries(3)         # with retry limit
+refine                                            # validation loop is built in
+refine.check(my_validator)
+refine.check(my_validator).max_retries(3)
 
 ensemble                                          # multi-program vote
-ensemble.n(5)                                     # sample count
+ensemble.n(5)
 ```
 
 Each builder method returns a new immutable module spec. Only the
@@ -645,19 +686,42 @@ Signature("question -> reasoning, answer")
 ```
 
 ### 2. Strategy-level decomposition
-If the module needs internal scaffolding, that is configured on the
-module itself:
+If the module needs internal scaffolding, the module owns it. For
+example, `chain_of_thought` already introduces internal reasoning, and
+`react` already introduces a tool-using trajectory. But the user may
+still ask the module to carry additional hidden working artifacts when
+that decomposition is useful:
 
 ```python
 Program(
-    chain_of_thought.via("reasoning", note="Internal reasoning"),
+    chain_of_thought.hint(
+        "Compare the line items, subtotal, tax, and total before producing the answer."
+    ).via(
+        "number_list",
+        note="All numeric values extracted from the receipt with nearby labels"
+    ),
+    OpenAILM("gpt-4o"),
+)
+
+Program(
+    react.tools([search_docs]).hint(
+        "Answer from the docs only after you have gathered the exact facts you need."
+    ).via(
+        "retrieved_facts",
+        note="Facts collected from tool calls that support the final answer"
+    ),
     OpenAILM("gpt-4o"),
 )
 ```
 
-These are not part of the Signature.
+The important distinction is:
+- the built-in hidden structure of a module belongs to the module
+- extra decomposition like `number_list` or `retrieved_facts` is a
+  strategy choice layered on top
+
+None of these hidden artifacts are part of the Signature.
 The optimizer may change them.
-They normally live in `Result.trace`.
+They normally live in `Result.trace` unless explicitly exposed.
 
 ### 3. Operational trace
 Things like tool logs, retries, trajectories, search branches, and
@@ -889,7 +953,9 @@ sig = (
 
 ```python
 program = Program(
-    chain_of_thought.hint("Reason carefully.").via("reasoning"),
+    chain_of_thought.hint(
+        "Classify the request by separating issue type from urgency: team depends on issue type; severity depends on urgency."
+    ),
     OpenAILM("gpt-4o", temperature=0.0),
 )
 ```
