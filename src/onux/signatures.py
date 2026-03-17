@@ -54,167 +54,33 @@ class Field:
 
 
 @dataclass(frozen=True)
-class ObjectiveTerm:
-    """Represent one scoring term inside an `Objective`.
+class _ObjectiveCriterion:
+    """Internal normalized objective criterion."""
 
-    Objective terms let you say *how* a signature should be judged. In practice
-    there are two common shapes:
-
-    - a rubric string, scored numerically by an external judge
-    - a Python callable that returns a numeric score, or something score-like
-
-    Parameters
-    ----------
-    kind : {"rubric", "callable"}
-        Objective term kind.
-    spec : str | Callable[..., Any]
-        Rubric text or scoring callable.
-    weight : float, default=1.0
-        Relative weight for this term when aggregating multiple terms.
-    name : str | None, default=None
-        Optional display name.
-
-    Examples
-    --------
-    Build a rubric term directly.
-
-    >>> term = ObjectiveTerm("rubric", "Is the answer correct?", weight=2.0, name="correctness")
-    >>> term.kind
-    'rubric'
-    >>> term.weight
-    2.0
-
-    Most code is a little nicer when you use the convenience constructors.
-
-    >>> rubric = ObjectiveTerm.rubric("Be concise.", name="brevity")
-    >>> rubric.kind
-    'rubric'
-    >>> rubric.name
-    'brevity'
-
-    >>> def overlap(answer: str, reference: str) -> float:
-    ...     return 1.0 if answer == reference else 0.0
-    >>> scorer = ObjectiveTerm.scorer(overlap, weight=0.5)
-    >>> scorer.kind
-    'callable'
-    >>> scorer.weight
-    0.5
-    """
-
-    kind: Literal["rubric", "callable"]
+    kind: Literal["rubric", "metric"]
     spec: str | Callable[..., Any]
-    weight: float = 1.0
-    name: str | None = None
-
-    @classmethod
-    def rubric(cls, text: str, *, weight: float = 1.0, name: str | None = None) -> ObjectiveTerm:
-        """Construct a rubric-based objective term.
-
-        Parameters
-        ----------
-        text : str
-            Rubric text to be judged numerically.
-        weight : float, default=1.0
-            Relative importance of this term.
-        name : str | None, optional
-            Optional display name.
-
-        Returns
-        -------
-        ObjectiveTerm
-            A rubric objective term.
-
-        Examples
-        --------
-        >>> term = ObjectiveTerm.rubric("Answers the question directly.", weight=2.0, name="directness")
-        >>> term.kind
-        'rubric'
-        >>> term.spec
-        'Answers the question directly.'
-        >>> term.weight
-        2.0
-        >>> term.name
-        'directness'
-        """
-        return cls("rubric", text, weight, name)
-
-    @classmethod
-    def scorer(cls, fn: Callable[..., Any], *, weight: float = 1.0, name: str | None = None) -> ObjectiveTerm:
-        """Construct a callable objective term.
-
-        Parameters
-        ----------
-        fn : Callable[..., Any]
-            Scoring callable.
-        weight : float, default=1.0
-            Relative importance of this term.
-        name : str | None, optional
-            Optional display name.
-
-        Returns
-        -------
-        ObjectiveTerm
-            A callable objective term.
-
-        Examples
-        --------
-        >>> def exact_match(answer: str, reference: str) -> float:
-        ...     return float(answer == reference)
-        >>> term = ObjectiveTerm.scorer(exact_match, weight=0.25, name="exact_match")
-        >>> term.kind
-        'callable'
-        >>> term.spec is exact_match
-        True
-        >>> term.weight
-        0.25
-        >>> term.name
-        'exact_match'
-        """
-        return cls("callable", fn, weight, name)
 
 
 @dataclass(frozen=True)
-class Objective:
-    """Collect one or more objective terms into a numeric objective.
+class _Objective:
+    """Internal normalized objective metadata."""
 
-    Parameters
-    ----------
-    terms : tuple[ObjectiveTerm, ...]
-        Objective terms to aggregate.
-    reduce : {"weighted_mean"}, default="weighted_mean"
-        Aggregation rule for combining multiple term scores.
-
-    Examples
-    --------
-    Build an objective from a pair of rubric terms.
-
-    >>> objective = Objective(
-    ...     terms=(
-    ...         ObjectiveTerm.rubric("Factually correct.", weight=2.0),
-    ...         ObjectiveTerm.rubric("Nicely structured.", weight=1.0),
-    ...     )
-    ... )
-    >>> len(objective.terms)
-    2
-    >>> objective.reduce
-    'weighted_mean'
-
-    Callable terms fit alongside rubric terms when you want a mixed objective.
-
-    >>> def exact_match(answer: str, reference: str) -> float:
-    ...     return float(answer == reference)
-    >>> mixed = Objective(
-    ...     terms=(
-    ...         ObjectiveTerm.rubric("Helpful to the user."),
-    ...         ObjectiveTerm.scorer(exact_match, name="exact_match"),
-    ...     )
-    ... )
-    >>> [term.kind for term in mixed.terms]
-    ['rubric', 'callable']
-    """
-
-    terms: tuple[ObjectiveTerm, ...]
+    criteria: tuple[_ObjectiveCriterion, ...]
+    weights: tuple[float, ...]
     reduce: Literal["weighted_mean"] = "weighted_mean"
+
+    def __post_init__(self) -> None:
+        if not self.criteria:
+            raise ValueError("Objective must contain at least one rubric or metric.")
+
+        normalized_weights = tuple(float(weight) for weight in self.weights)
+        if len(normalized_weights) != len(self.criteria):
+            raise ValueError("'weights' must have the same length as the number of objective items.")
+        if any(weight <= 0.0 for weight in normalized_weights):
+            raise ValueError("Objective weights must all be positive.")
+        if not _weights_sum_to_one(normalized_weights):
+            raise ValueError("Objective weights must sum to 1.0.")
+        object.__setattr__(self, "weights", normalized_weights)
 
 
 _ROLE_ORDER = {"input": 0, "hidden": 1, "output": 2}
@@ -290,14 +156,14 @@ class Signature:
     ...     ])
     ...     .objective(
     ...         "Correct and unambiguous.",
-    ...         ObjectiveTerm.scorer(exact_match, name="exact_match"),
-    ...         weights=(2.0, 1.0),
+    ...         exact_match,
+    ...         (2 / 3, 1 / 3),
     ...     )
     ... )
     >>> rich.n_examples
     2
-    >>> [term.kind for term in rich.objective_spec.terms]
-    ['rubric', 'callable']
+    >>> [criterion.kind for criterion in rich.objective_spec.criteria]
+    ['rubric', 'metric']
     """
 
     __slots__ = ("_fields", "_hint", "_examples", "_objective")
@@ -310,7 +176,7 @@ class Signature:
         hint: str | None = None,
         _fields: tuple[Field, ...] | None = None,
         _examples: ExamplesTable | None = None,
-        _objective: Objective | None = None,
+        _objective: _Objective | None = None,
     ):
         """Create a signature from a formula or prebuilt internal state.
 
@@ -330,7 +196,7 @@ class Signature:
         _examples : ExamplesTable | None, optional
             Internal normalized examples table used when cloning an existing
             signature.
-        _objective : Objective | None, optional
+        _objective : _Objective | None, optional
             Internal normalized objective used when cloning an existing
             signature.
 
@@ -449,14 +315,14 @@ class Signature:
         return 0 if self._examples is None else len(self._examples)
 
     @property
-    def objective_spec(self) -> Objective | None:
+    def objective_spec(self) -> Any | None:
         """Return the normalized objective attached to the signature.
 
         Returns
         -------
-        Objective | None
-            The attached objective, or `None` when the signature has no
-            objective yet.
+        Any | None
+            Internal normalized objective metadata, or `None` when the
+            signature has no objective yet.
 
         Examples
         --------
@@ -465,10 +331,12 @@ class Signature:
         True
 
         >>> scored = plain.objective("Correct.")
-        >>> isinstance(scored.objective_spec, Objective)
-        True
-        >>> len(scored.objective_spec.terms)
+        >>> len(scored.objective_spec.criteria)
         1
+        >>> scored.objective_spec.criteria[0].kind
+        'rubric'
+        >>> scored.objective_spec.weights
+        (1.0,)
         """
         return self._objective
 
@@ -709,25 +577,24 @@ class Signature:
 
     def objective(
         self,
-        *terms: str | Callable[..., Any] | ObjectiveTerm | Objective,
-        weights: tuple[float, ...] | None = None,
+        *items: str | Callable[..., Any] | tuple[float, ...],
         reduce: Literal["weighted_mean"] = "weighted_mean",
     ) -> Signature:
         """Return a copy with a numeric objective.
 
-        Each term is one of four things:
+        Each positional item is interpreted as follows:
 
-        - a rubric string, to be judged numerically by an external judge
-        - a Python scoring callable
-        - an `ObjectiveTerm`
-        - a fully constructed `Objective`
+        - a string means a rubric
+        - a callable means a metric
+        - a final tuple of floats, when present, gives normalized weights
+
+        When no final weight tuple is provided, all objective items receive
+        equal weight.
 
         Parameters
         ----------
-        *terms : str | Callable[..., Any] | ObjectiveTerm | Objective
-            Objective terms to attach.
-        weights : tuple[float, ...] | None, optional
-            Optional weights aligned with `terms`.
+        *items : str | Callable[..., Any] | tuple[float, ...]
+            Rubrics, metrics, and optionally one final weight tuple.
         reduce : {"weighted_mean"}, default="weighted_mean"
             Aggregation rule used when combining term scores.
 
@@ -738,47 +605,41 @@ class Signature:
 
         Examples
         --------
-        Start with a single rubric term.
+        Start with a single rubric.
 
         >>> sig = Signature("question -> answer").objective("Correct and concise.")
-        >>> len(sig.objective_spec.terms)
+        >>> len(sig.objective_spec.criteria)
         1
-        >>> sig.objective_spec.terms[0].kind
+        >>> sig.objective_spec.criteria[0].kind
         'rubric'
+        >>> sig.objective_spec.weights
+        (1.0,)
 
-        Add several rubric terms and weight them differently when one matters
-        more than another.
+        Add several rubrics and provide a final normalized weight tuple.
 
         >>> weighted = Signature("question -> answer").objective(
         ...     "Factually correct.",
         ...     "Easy to read.",
-        ...     weights=(3.0, 1.0),
+        ...     (0.75, 0.25),
         ... )
-        >>> [term.weight for term in weighted.objective_spec.terms]
-        [3.0, 1.0]
+        >>> weighted.objective_spec.weights
+        (0.75, 0.25)
 
-        Mix rubric terms with Python scorers for a richer evaluation.
+        Mix rubrics with Python metrics.
 
         >>> def exact_match(answer: str, expected: str) -> float:
         ...     return float(answer == expected)
         >>> mixed = Signature("question -> answer").objective(
         ...     "Answers the user's question.",
-        ...     ObjectiveTerm.scorer(exact_match, name="exact_match"),
-        ...     weights=(2.0, 1.0),
+        ...     exact_match,
+        ...     (2 / 3, 1 / 3),
         ... )
-        >>> [term.kind for term in mixed.objective_spec.terms]
-        ['rubric', 'callable']
-        >>> mixed.objective_spec.terms[1].name
-        'exact_match'
-
-        If you already have a complete `Objective`, you can pass it in as is.
-
-        >>> prebuilt = Objective((ObjectiveTerm.rubric("Polite and helpful."),))
-        >>> sig = Signature("question -> answer").objective(prebuilt)
-        >>> sig.objective_spec is prebuilt
+        >>> [criterion.kind for criterion in mixed.objective_spec.criteria]
+        ['rubric', 'metric']
+        >>> mixed.objective_spec.criteria[1].spec is exact_match
         True
         """
-        objective = _normalize_objective_terms(terms, weights=weights, reduce=reduce)
+        objective = _normalize_objective_items(items, reduce=reduce)
         return Signature(
             _fields=self._fields,
             hint=self._hint,
@@ -786,41 +647,35 @@ class Signature:
             _objective=objective,
         )
 
-    def rubric(self, text: str, *, weight: float = 1.0, name: str | None = None) -> Signature:
-        """Return a copy with a single rubric objective term.
+    def rubric(self, text: str) -> Signature:
+        """Return a copy with a single rubric objective.
 
         This is a small convenience wrapper around `objective` for the common
-        case where you only want one rubric term.
+        case where you only want one rubric.
 
         Parameters
         ----------
         text : str
             Rubric text to judge numerically.
-        weight : float, default=1.0
-            Weight for the rubric term.
-        name : str | None, optional
-            Optional display name.
 
         Returns
         -------
         Signature
-            A new signature with a one-term rubric objective.
+            A new signature with a one-rubric objective.
 
         Examples
         --------
         >>> sig = Signature("question -> answer").rubric(
         ...     "Correct, direct, and avoids unnecessary detail.",
-        ...     weight=2.0,
-        ...     name="quality",
         ... )
-        >>> len(sig.objective_spec.terms)
+        >>> len(sig.objective_spec.criteria)
         1
-        >>> sig.objective_spec.terms[0].name
-        'quality'
-        >>> sig.objective_spec.terms[0].weight
-        2.0
+        >>> sig.objective_spec.criteria[0].kind
+        'rubric'
+        >>> sig.objective_spec.weights
+        (1.0,)
         """
-        return self.objective(ObjectiveTerm.rubric(text, weight=weight, name=name))
+        return self.objective(text)
 
     def via(
         self,
@@ -980,8 +835,8 @@ class Signature:
 
         Notes
         -----
-        Callable objective terms are serialized by name only. Their executable
-        Python bodies are not reconstructed by `load_state`.
+        Callable metrics are serialized by name only. Their executable Python
+        bodies are not reconstructed by `load_state`.
 
         Examples
         --------
@@ -1000,7 +855,7 @@ class Signature:
         'Answer briefly.'
         >>> state['examples'][0]['answer']
         '4'
-        >>> state['objective']['terms'][0]['kind']
+        >>> state['objective']['criteria'][0]['kind']
         'rubric'
 
         This is especially handy for round-tripping through JSON-like storage.
@@ -1024,14 +879,13 @@ class Signature:
             "examples": self._examples.to_records() if self._examples is not None else None,
             "objective": None if self._objective is None else {
                 "reduce": self._objective.reduce,
-                "terms": [
+                "weights": list(self._objective.weights),
+                "criteria": [
                     {
-                        "kind": term.kind,
-                        "spec": term.spec if term.kind == "rubric" else _callable_name(term.spec),
-                        "weight": term.weight,
-                        "name": term.name,
+                        "kind": criterion.kind,
+                        "spec": criterion.spec if criterion.kind == "rubric" else _callable_name(criterion.spec),
                     }
-                    for term in self._objective.terms
+                    for criterion in self._objective.criteria
                 ],
             },
         }
@@ -1052,7 +906,7 @@ class Signature:
 
         Notes
         -----
-        Callable objective terms are restored by their serialized names, not by
+        Callable metrics are restored by their serialized names, not by
         executable Python function objects.
 
         Examples
@@ -1073,7 +927,7 @@ class Signature:
         True
         >>> restored.n_examples
         1
-        >>> restored.objective_spec.terms[0].kind
+        >>> restored.objective_spec.criteria[0].kind
         'rubric'
         """
         fields = [
@@ -1085,11 +939,29 @@ class Signature:
         objective_state = state.get("objective")
         objective = None
         if objective_state is not None:
-            objective = Objective(
-                terms=tuple(
-                    ObjectiveTerm(term["kind"], term["spec"], term.get("weight", 1.0), term.get("name"))
-                    for term in objective_state.get("terms", [])
+            criterion_states = objective_state.get("criteria")
+            legacy_state = criterion_states is None
+            if criterion_states is None:
+                criterion_states = objective_state.get("terms", [])
+
+            weights_state = objective_state.get("weights")
+            if weights_state is None:
+                weights_state = [criterion.get("weight", 1.0) for criterion in criterion_states]
+
+            if legacy_state:
+                weights = _normalize_legacy_weights(weights_state)
+            else:
+                weights = tuple(float(weight) for weight in weights_state)
+
+            objective = _Objective(
+                criteria=tuple(
+                    _ObjectiveCriterion(
+                        "metric" if criterion["kind"] == "callable" else criterion["kind"],
+                        criterion["spec"],
+                    )
+                    for criterion in criterion_states
                 ),
+                weights=weights,
                 reduce=objective_state.get("reduce", "weighted_mean"),
             )
 
@@ -1134,14 +1006,13 @@ class Signature:
 
         if self._objective is not None:
             lines.append("  objective:")
-            for term in self._objective.terms:
-                if term.kind == "rubric":
-                    label = shorten(term.name or str(term.spec), max_objective_chars)
+            for criterion, weight in zip(self._objective.criteria, self._objective.weights):
+                if criterion.kind == "rubric":
+                    label = shorten(str(criterion.spec), max_objective_chars)
                 else:
-                    name = term.name or _callable_name(term.spec)
-                    label = shorten(name, max_objective_chars)
-                if len(self._objective.terms) > 1 or term.weight != 1.0:
-                    label = f"{label} [weight={term.weight:g}]"
+                    label = shorten(_metric_name(criterion.spec), max_objective_chars)
+                if len(self._objective.criteria) > 1 or weight != 1.0:
+                    label = f"{label} [weight={weight:g}]"
                 lines.append(f"    - {label}")
 
         for field in self._fields:
@@ -1169,7 +1040,7 @@ class Signature:
         return hash((self._fields, self._hint, self._objective, _freeze_examples(self._examples)))
 
 
-__all__ = ["Field", "ObjectiveTerm", "Objective", "Signature"]
+__all__ = ["Field", "Signature"]
 
 
 def _callable_name(obj: Any) -> str:
@@ -1177,6 +1048,17 @@ def _callable_name(obj: Any) -> str:
     qualname = getattr(obj, "__qualname__", None) or getattr(obj, "__name__", None)
     if module and qualname:
         return f"{module}.{qualname}"
+    if qualname:
+        return qualname
+    return str(obj)
+
+
+
+def _metric_name(obj: Any) -> str:
+    name = getattr(obj, "__name__", None)
+    if name:
+        return name
+    qualname = getattr(obj, "__qualname__", None)
     if qualname:
         return qualname
     return str(obj)
@@ -1193,43 +1075,61 @@ def _type_name(tp: Any) -> str:
 
 
 
-def _normalize_objective_terms(
-    terms: tuple[str | Callable[..., Any] | ObjectiveTerm | Objective, ...],
+def _weights_sum_to_one(weights: tuple[float, ...], *, tol: float = 1e-9) -> bool:
+    return abs(sum(weights) - 1.0) <= tol
+
+
+
+def _equal_weights(count: int) -> tuple[float, ...]:
+    return tuple(1.0 / count for _ in range(count))
+
+
+
+def _normalize_legacy_weights(weights: Any) -> tuple[float, ...]:
+    normalized = tuple(float(weight) for weight in weights)
+    if not normalized:
+        return normalized
+    total = sum(normalized)
+    if total <= 0.0:
+        raise ValueError("Objective weights must sum to a positive value.")
+    return tuple(weight / total for weight in normalized)
+
+
+
+def _normalize_objective_items(
+    items: tuple[str | Callable[..., Any] | tuple[float, ...], ...],
     *,
-    weights: tuple[float, ...] | None = None,
     reduce: Literal["weighted_mean"] = "weighted_mean",
-) -> Objective:
-    if len(terms) == 1 and isinstance(terms[0], Objective):
-        if weights is not None:
-            raise ValueError("Do not pass 'weights' when providing a prebuilt Objective.")
-        return terms[0]
+) -> _Objective:
+    if not items:
+        raise ValueError("Provide at least one rubric or metric.")
 
-    if not terms:
-        raise ValueError("Provide at least one objective term.")
+    weights: tuple[float, ...] | None = None
+    criteria_items = items
+    if isinstance(items[-1], tuple):
+        weights = tuple(float(weight) for weight in items[-1])
+        criteria_items = items[:-1]
 
-    if weights is not None and len(weights) != len(terms):
-        raise ValueError("'weights' must have the same length as the number of objective terms.")
+    if not criteria_items:
+        raise ValueError("Provide at least one rubric or metric before the final weight tuple.")
 
-    normalized: list[ObjectiveTerm] = []
-    for i, term in enumerate(terms):
-        weight = 1.0 if weights is None else float(weights[i])
-        if isinstance(term, ObjectiveTerm):
-            if weights is not None and term.weight != 1.0:
-                normalized.append(ObjectiveTerm(term.kind, term.spec, weight, term.name))
-            elif weights is not None:
-                normalized.append(ObjectiveTerm(term.kind, term.spec, weight, term.name))
-            else:
-                normalized.append(term)
-        elif isinstance(term, str):
-            normalized.append(ObjectiveTerm.rubric(term, weight=weight))
-        elif callable(term):
-            normalized.append(ObjectiveTerm.scorer(term, weight=weight))
+    criteria: list[_ObjectiveCriterion] = []
+    for item in criteria_items:
+        if isinstance(item, tuple):
+            raise TypeError("Only the final positional item may be a weight tuple.")
+        if isinstance(item, str):
+            criteria.append(_ObjectiveCriterion("rubric", item))
+        elif callable(item):
+            criteria.append(_ObjectiveCriterion("metric", item))
         else:
-            raise TypeError(
-                "Objective terms must be rubric strings, scoring callables, ObjectiveTerm objects, or a prebuilt Objective."
-            )
+            raise TypeError("Objective items must be rubric strings, metric callables, and optionally one final weight tuple.")
 
-    return Objective(tuple(normalized), reduce=reduce)
+    if weights is None:
+        weights = _equal_weights(len(criteria))
+    elif len(weights) != len(criteria):
+        raise ValueError("The final weight tuple must have the same length as the number of rubrics and metrics.")
+
+    return _Objective(tuple(criteria), weights=weights, reduce=reduce)
 
 
 
