@@ -108,7 +108,7 @@ print(code_exec(qa, inputs, lm=lm, adapter=adapter, lint=None, max_fixes=1))
 ```python
 from functools import partial
 
-careful_cot = partial(chain_of_thought, desc="Break the problem into small steps")
+careful_cot = partial(chain_of_thought, note="Break the problem into small steps")
 strict_refine = partial(refine, check=lambda result: None, max_retries=3)
 
 print(module_name(careful_cot))
@@ -116,7 +116,7 @@ print(module_name(strict_refine))
 ```
 
 ```output:exec-1773708613981-71j4g
-chain_of_thought(desc='Break the problem into small steps')
+chain_of_thought(note='Break the problem into small steps')
 refine(check=<function <lambda> at 0x74129c130220>, max_retries=3)
 ```
 

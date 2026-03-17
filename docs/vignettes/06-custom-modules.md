@@ -68,7 +68,7 @@ This one mixes LLM generation with local code.
 from onux import Signature, predict
 
 def lint_and_fix(sig, inputs, *, lm, adapter, lint, max_rounds=3):
-    code_sig = sig.via("code", desc="Python code that solves the problem")
+    code_sig = sig.via("code", note="Python code that solves the problem")
     state = dict(inputs)
     result = {}
 
@@ -101,7 +101,7 @@ class Translate(Layer):
 
 text = Input("text")
 translation = Translate(
-    instructions="Translate the input to French.",
+    hint="Translate the input to French.",
     lm="gpt-4o",
 )(text)
 
@@ -286,7 +286,7 @@ numbers = ExtractNumbers()(translation)
 
 final_answer = Translate(
     output="final_answer",
-    instructions="Answer using the translation, label, embedding, and numbers.",
+    hint="Answer using the translation, label, embedding, and numbers.",
 )([translation, label, confidence, embedding, numbers])
 
 hybrid_model = Model(

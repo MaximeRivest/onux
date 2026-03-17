@@ -32,7 +32,7 @@ question -> answer
 ## Add one hidden field
 
 ```python
-sig = Signature("question -> answer").via("reasoning", desc="Think step by step")
+sig = Signature("question -> answer").via("reasoning", note="Think step by step")
 print(sig)
 ```
 
@@ -72,21 +72,20 @@ question -> answer
 1  Capital of France?  Paris
 ```
 
-## Descriptions live on fields
+## Notes live on fields
 
 ```python
 from typing import Literal
-from onux import Signature, describe_type
+from onux import Signature
 
 Sentiment = Literal["positive", "negative", "neutral"]
 
 review = Signature("text -> sentiment: Sentiment, rating: float, summary", types={
     "Sentiment": Sentiment,
-}).describe(
+}).note(
     rating="star rating",
 )
 print(review)
-print(describe_type(Sentiment))
 ```
 
 ```output:exec-1773708510833-ug1h3
@@ -96,13 +95,12 @@ text -> sentiment, rating, summary
   ← sentiment  one of: 'positive', 'negative', 'neutral'
   ← rating     star rating: float
   ← summary    str
-one of: 'positive', 'negative', 'neutral'
 ```
 
-## Update descriptions and types after the fact
+## Update notes and types after the fact
 
 ```python
-review = review.describe(text="Product review text", summary="Brief summary")
+review = review.note(text="Product review text", summary="Brief summary")
 review = review.retype(summary=str)
 print(review)
 ```
@@ -120,7 +118,7 @@ text -> sentiment, rating, summary
 
 ```python
 sig2 = Signature("question -> answer")
-sig2 = sig2.add("confidence", float, desc="Confidence score")
+sig2 = sig2.add("confidence", float, note="Confidence score")
 print(sig2)
 
 sig3 = sig2.remove("confidence")

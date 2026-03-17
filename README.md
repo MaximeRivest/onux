@@ -56,12 +56,12 @@ For more hidden scaffolding, factor through extra fields with `.via()`:
 
 ```python
 sig = Signature("receipt_image -> before_tax: float, after_tax: float")
-sig = sig.via("extracted_numbers", desc="All monetary values on the receipt")
-sig = sig.via("reasoning", desc="Step-by-step tax calculation")
+sig = sig.via("extracted_numbers", note="All monetary values on the receipt")
+sig = sig.via("reasoning", note="Step-by-step tax calculation")
 print(sig)
 ```
 
-### Descriptions live on fields
+### Notes live on fields
 
 ```python
 from typing import Literal
@@ -72,7 +72,7 @@ Sentiment = Literal["positive", "negative", "neutral"]
 review = Signature(
     "text -> sentiment: Sentiment, rating: float, summary",
     types={"Sentiment": Sentiment},
-).describe(
+).note(
     rating="star rating",
     summary="brief summary",
 )
@@ -129,7 +129,7 @@ from functools import partial
 from onux import Signature, chain_of_thought, refine
 
 sig = Signature("question -> answer")
-careful_cot = partial(chain_of_thought, desc="Break the problem into small steps")
+careful_cot = partial(chain_of_thought, note="Break the problem into small steps")
 strict_refine = partial(refine, check=lambda result: None, max_retries=3)
 ```
 
@@ -324,7 +324,6 @@ Top-level imports:
 ```python
 from onux import (
     Signature,
-    describe_type,
     Input,
     Symbol,
     FieldSpec,

@@ -35,7 +35,6 @@ from onux import (
     Symbol,
     chain_of_thought,
     code_exec,
-    describe_type,
     ensemble,
     fallback,
     module_name,
@@ -66,21 +65,11 @@ question -> answer
 
 ```python
 field = Field("rating", "output", float, "star rating")
-print(field.name, field.role, field.describe())
+print(field.name, field.role, field.base_type.__name__, field.note)
 ```
 
 ```output:exec-1773708257153-ajvqd
-rating output star rating: float
-```
-
-### `describe_type`
-
-```python
-print(describe_type(list[str]))
-```
-
-```output:exec-1773708261463-jr9re
-list[str]
+rating output float star rating
 ```
 
 ## Core symbolic graph API
@@ -88,7 +77,7 @@ list[str]
 ### `Input`
 
 ```python
-question = Input("question", type=str, desc="User question")
+question = Input("question", type=str, note="User question")
 print(question)
 ```
 
@@ -115,7 +104,7 @@ print(spec)
 ```
 
 ```output:exec-1773708269478-gzvvj
-FieldSpec(name='reasoning', annotation=<class 'str'>, desc='Step-by-step reasoning', kind='hidden')
+FieldSpec(name='reasoning', annotation=<class 'str'>, note='Step-by-step reasoning', kind='hidden')
 ```
 
 ### `Layer`
@@ -127,7 +116,7 @@ class Translate(Layer):
     pass
 
 text = Input("text")
-translation = Translate("translation", instructions="Translate to French.")(text)
+translation = Translate("translation", hint="Translate to French.")(text)
 print(translation)
 ```
 
@@ -363,10 +352,10 @@ refine(check=<function <lambda> at 0x7b80d46214e0>, max_retries=2)
 
 ## Signature methods
 
-### `.instruct()`
+### `.hint()`
 
 ```python
-print(Signature("question -> answer").instruct("Be concise."))
+print(Signature("question -> answer").hint("Be concise."))
 ```
 
 ```output:exec-1773708400246-hr2q7
@@ -376,10 +365,10 @@ question -> answer
   ← answer    str
 ```
 
-### `.describe()`
+### `.note()`
 
 ```python
-print(Signature("question -> answer").describe(question="A factual question"))
+print(Signature("question -> answer").note(question="A factual question"))
 ```
 
 ```output:exec-1773708407595-g0ss1
@@ -405,7 +394,7 @@ question -> answer
 ### `.via()`
 
 ```python
-print(Signature("question -> answer").via("reasoning", desc="Think first"))
+print(Signature("question -> answer").via("reasoning", note="Think first"))
 ```
 
 ```output:exec-1773708414188-y0kst
@@ -460,7 +449,7 @@ question -> answer
 ### `.dump_state()` / `.load_state()`
 
 ```python
-sig2 = Signature("question -> answer").describe(answer="Short answer")
+sig2 = Signature("question -> answer").note(answer="Short answer")
 state = sig2.dump_state()
 print(Signature.load_state(state))
 ```
@@ -537,6 +526,3 @@ Examples: 1 rows
 Out[49]: 'Model: "model"\nInputs:\n  - question: str\nOutputs:\n  - answer: str (public)\nGraph:\n  - [4] ReAct(trajectory, answer) <- question, module=react\nCompile: {\'optimizer\': \'auto_prompt\', \'meta_lm\': \'gpt-4.1\'}\nExamples: 1 rows'
 ```
 
-```python
-
-```
