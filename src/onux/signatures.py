@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Mapping, get_args, get_origin
@@ -631,10 +632,15 @@ class Signature:
 
         Metric callables should accept named parameters corresponding to the
         signature fields they need. They do not need to accept every field.
+        The reserved parameter name `runtime` receives execution telemetry,
+        such as latency, cost, token counts, or retries.
 
         In other words, metric parameters should be chosen by field name, not
         by position. A metric may use only outputs, or a mix of inputs,
-        hidden fields, and outputs.
+        hidden fields, and outputs. Hidden fields are for intermediate
+        artifacts such as reasoning, evidence, or plans. If a metric needs
+        execution telemetry such as latency or cost, ask for it through
+        `runtime` rather than modeling telemetry as a signature field.
 
         Common shapes look like:
 
@@ -642,10 +648,17 @@ class Signature:
         ...     return float(len(answer.split()) <= 20)
         >>> def grounded(question: str, context: str, answer: str) -> float:
         ...     return 1.0
+        >>> def cheap(runtime: Any) -> float:
+        ...     return max(0.0, min(1.0, 1.0 - getattr(runtime, "cost_usd", 0.0)))
 
         Metrics should return a numeric score, ideally a float from 0 to 1,
         where higher is better. Returning `bool` is also fine when the metric
-        is naturally pass/fail.
+        is naturally pass/fail. Metrics are validated when attached: their
+        parameter names must match declared signature fields or the reserved
+        name `runtime`.
+
+        To actually execute metric callables and aggregate them with externally
+        supplied rubric scores, use `evaluate(...)`.
 
         Examples
         --------
@@ -689,15 +702,13 @@ class Signature:
         You can also build a more realistic five-axis objective that mixes two
         judge-written rubrics with three programmatic metrics.
 
-        >>> def cheap(price_usd: float) -> float:
-        ...     return max(0.0, min(1.0, 1.0 - price_usd / 10.0))
-        >>> def low_latency(latency_ms: float) -> float:
-        ...     return max(0.0, min(1.0, 1.0 - latency_ms / 2000.0))
-        >>> def fast_total_time(total_time_s: float) -> float:
-        ...     return max(0.0, min(1.0, 1.0 - total_time_s / 30.0))
-        >>> compound = Signature(
-        ...     "question -> answer, price_usd, latency_ms, total_time_s"
-        ... ).objective(
+        >>> def cheap(runtime: Any) -> float:
+        ...     return max(0.0, min(1.0, 1.0 - getattr(runtime, "cost_usd", 0.0) / 10.0))
+        >>> def low_latency(runtime: Any) -> float:
+        ...     return max(0.0, min(1.0, 1.0 - getattr(runtime, "latency_ms", 0.0) / 2000.0))
+        >>> def fast_total_time(runtime: Any) -> float:
+        ...     return max(0.0, min(1.0, 1.0 - getattr(runtime, "total_time_s", 0.0) / 30.0))
+        >>> compound = Signature("question -> answer").objective(
         ...     "Assign a score from 0 to 1 for answer accuracy, where 1 means fully correct and 0 means clearly incorrect.",
         ...     "Assign a score from 0 to 1 for overall usefulness, where 1 means the answer is helpful, well explained, and appropriate for the user, and 0 means it is unhelpful or poorly framed.",
         ...     cheap,
@@ -710,6 +721,9 @@ class Signature:
         >>> compound.objective_spec.weights
         (4.0, 2.0, 1.0, 1.0, 1.0)
         """
+        for item in items:
+            if callable(item) and not isinstance(item, tuple):
+                _validate_metric_signature(item, self.fields)
         objective = _normalize_objective_items(items)
         return Signature(
             _fields=self._fields,
@@ -717,6 +731,148 @@ class Signature:
             _examples=self._examples,
             _objective=objective,
         )
+
+    def evaluate(
+        self,
+        values: Mapping[str, Any],
+        *,
+        runtime: Any | None = None,
+        rubric_scores: tuple[float, ...] | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate the attached objective on field values and optional runtime.
+
+        Parameters
+        ----------
+        values : Mapping[str, Any]
+            Available field values keyed by signature field name.
+        runtime : Any | None, optional
+            Optional execution telemetry exposed to metrics through a parameter
+            named `runtime`.
+        rubric_scores : tuple[float, ...] | None, optional
+            Numeric scores for rubric criteria, in rubric order. Rubric strings
+            are instructions for an external judge, so this method expects you
+            to supply their numeric results.
+
+        Returns
+        -------
+        dict[str, Any]
+            Evaluation summary containing per-criterion scores, weights, and
+            the final weighted score under key `score`.
+
+        Notes
+        -----
+        Metrics are executed automatically and bind by parameter name. Any
+        metric parameter matching a signature field receives that field value;
+        the reserved parameter name `runtime` receives execution telemetry.
+
+        Rubrics are not executed here; instead, pass their judged numeric
+        scores through `rubric_scores`.
+
+        The returned `score` is a weighted mean using the objective weights as
+        relative parts.
+
+        Examples
+        --------
+        Evaluate a metric-only objective directly.
+
+        >>> from types import SimpleNamespace
+        >>> def brief(answer: str, runtime: Any) -> float:
+        ...     return float(len(answer.split()) <= 3 and runtime.latency_ms < 500)
+        >>> sig = Signature("question -> answer").objective(brief)
+        >>> result = sig.evaluate(
+        ...     {"question": "Capital of France", "answer": "Paris"},
+        ...     runtime=SimpleNamespace(latency_ms=120),
+        ... )
+        >>> result['score']
+        1.0
+        >>> result['criteria'][0]['kind']
+        'metric'
+
+        Evaluate a mixed objective by supplying rubric scores alongside the
+        automatic metric evaluations.
+
+        >>> def single_sentence(answer: str) -> float:
+        ...     sentence_marks = answer.count(".") + answer.count("!") + answer.count("?")
+        ...     return float("\\n" not in answer and sentence_marks <= 1)
+        >>> sig = Signature("question -> answer").objective(
+        ...     "Assign a score from 0 to 1 for factual correctness, where 1 means fully correct and 0 means clearly incorrect.",
+        ...     single_sentence,
+        ...     (2.0, 1.0),
+        ... )
+        >>> result = sig.evaluate(
+        ...     {"question": "Capital of France", "answer": "Paris"},
+        ...     rubric_scores=(0.75,),
+        ... )
+        >>> round(result['score'], 3)
+        0.833
+        >>> [item['score'] for item in result['criteria']]
+        [0.75, 1.0]
+        """
+        if self._objective is None:
+            raise ValueError("This signature has no objective to evaluate.")
+
+        rubric_scores = () if rubric_scores is None else tuple(float(score) for score in rubric_scores)
+        rubric_index = 0
+        weighted_sum = 0.0
+        total_weight = 0.0
+        results: list[dict[str, Any]] = []
+
+        for criterion, weight in zip(self._objective.criteria, self._objective.weights):
+            if criterion.kind == "rubric":
+                if rubric_index >= len(rubric_scores):
+                    raise ValueError(
+                        "Missing rubric scores. Provide one numeric score per rubric criterion in rubric order."
+                    )
+                score = _coerce_score(rubric_scores[rubric_index], source="rubric")
+                rubric_index += 1
+                label = str(criterion.spec)
+            else:
+                metric = criterion.spec
+                signature = inspect.signature(metric)
+                bound: dict[str, Any] = {}
+                missing: list[str] = []
+
+                for parameter in signature.parameters.values():
+                    if parameter.name == "runtime":
+                        if runtime is not None:
+                            bound[parameter.name] = runtime
+                        elif parameter.default is inspect.Signature.empty:
+                            missing.append("runtime")
+                        continue
+
+                    if parameter.name in values:
+                        bound[parameter.name] = values[parameter.name]
+                    elif parameter.default is inspect.Signature.empty:
+                        missing.append(parameter.name)
+
+                if missing:
+                    raise ValueError(
+                        f"Metric {_metric_name(metric)!r} is missing required values for: {', '.join(missing)}."
+                    )
+
+                score = _coerce_score(metric(**bound), source=f"metric {_metric_name(metric)!r}")
+                label = _metric_name(metric)
+
+            weighted_sum += weight * score
+            total_weight += weight
+            results.append({
+                "kind": criterion.kind,
+                "label": label,
+                "weight": weight,
+                "score": score,
+            })
+
+        if rubric_index != len(rubric_scores):
+            raise ValueError(
+                f"Received {len(rubric_scores)} rubric scores, but the objective contains {rubric_index} rubrics."
+            )
+
+        return {
+            "score": weighted_sum / total_weight,
+            "weights": self._objective.weights,
+            "criteria": results,
+        }
+
     def via(
         self,
         name: str,
@@ -886,6 +1042,7 @@ class Signature:
         ...     Signature("question -> answer")
         ...     .hint("Answer briefly.")
         ...     .examples([{"question": "2 + 2", "answer": "4"}])
+        ...     .objective("Assign a score from 0 to 1 for factual correctness, where 1 means fully correct and 0 means clearly incorrect.")
         ...     .dump_state()
         ... )
         >>> state['formula']
@@ -956,6 +1113,7 @@ class Signature:
         ...     .hint("Answer and include confidence.")
         ...     .type(confidence=float)
         ...     .examples([{"question": "2 + 2", "answer": "4", "confidence": 0.99}])
+        ...     .objective("Assign a score from 0 to 1 for answers that are both correct and well calibrated, where higher scores require both accurate content and appropriate confidence.")
         ... )
         >>> restored = Signature.load_state(original.dump_state())
         >>> restored.formula
@@ -1112,6 +1270,44 @@ def _equal_weights(count: int) -> tuple[float, ...]:
 
 def _coerce_weights(weights: Any) -> tuple[float, ...]:
     return tuple(float(weight) for weight in weights)
+
+
+
+def _coerce_score(value: Any, *, source: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"Expected a numeric score from {source}, got {value!r}.") from exc
+
+
+
+def _validate_metric_signature(metric: Callable[..., Any], fields: Mapping[str, Field]) -> None:
+    available = set(fields)
+    allowed = available | {"runtime"}
+    signature = inspect.signature(metric)
+
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+            raise TypeError(
+                f"Metric {_metric_name(metric)!r} cannot use positional-only parameter {parameter.name!r}. "
+                "Use named parameters matching signature fields and optionally `runtime`."
+            )
+        if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+            raise TypeError(
+                f"Metric {_metric_name(metric)!r} cannot use *args. "
+                "Use named parameters matching signature fields and optionally `runtime`."
+            )
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            raise TypeError(
+                f"Metric {_metric_name(metric)!r} cannot use **kwargs. "
+                "List the signature fields you want explicitly, and use `runtime` for execution telemetry."
+            )
+        if parameter.name not in allowed:
+            available_list = ", ".join(sorted(available)) or "(no fields)"
+            raise TypeError(
+                f"Metric {_metric_name(metric)!r} uses unknown parameter {parameter.name!r}. "
+                f"Available signature fields: {available_list}. Reserved telemetry parameter: runtime."
+            )
 
 
 

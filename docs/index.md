@@ -17,3 +17,4 @@ notes, and incremental structure changes are handled with methods like
 ## Reference
 
 - [API reference](api-reference.md)
+- [Design note: Honest API](honest-api.md)
