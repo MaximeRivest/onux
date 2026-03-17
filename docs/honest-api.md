@@ -213,57 +213,105 @@ Both fulfill the same contract:
 (sig, inputs) -> dict
 ```
 
-### Every axis is independently open, seeded, or pinned
+### Axes of a program
 
-A program is not "general" or "specific" as a whole. Each axis has one
-of three states:
+A program is not "general" or "specific" as a whole. It is a collection
+of independent axes, each of which can be configured separately:
 
-- **Open** — no initial value. The optimizer searches freely.
-- **Seeded** — an initial value as a starting point. The optimizer can
-  explore from it.
-- **Pinned** — a fixed value. The optimizer does not touch it.
+| Axis | What it controls | Example values |
+|---|---|---|
+| `module` | Strategy pattern | `predict`, `chain_of_thought`, `react`, `refine` |
+| `runner` | What executes | `LM("gpt-4o")`, `SklearnModel(...)`, `Regex(...)` |
+| `runner.model` | Specific model | `"gpt-4o"`, `"ft:gpt-4o:triage-v3"`, `"claude-3-5-sonnet"` |
+| `runner.provider` | API / SDK | `"openai"`, `"azure"`, `"anyscale"`, `"vllm"` |
+| `runner.temperature` | Sampling temperature | `0.0`, `0.3`, `0.7` |
+| `adapter` | How to render/parse | `XMLAdapter`, `JSONAdapter`, `auto` |
+| `via` | Hidden fields | `[("reasoning",)]`, `[("plan",), ("evidence",)]` |
+| `hint` | Task-level prompt text | `"Think step by step."` |
+| `notes` | Per-field prompt text | `{"answer": "One sentence."}` |
+| `max_retries` | Retry count (refine) | `1`, `3`, `5` |
+| `tools` | Tool list (react) | `[search, calculator]` |
+| `n` | Vote count (ensemble) | `3`, `5`, `7` |
 
-| Axis | Open | Seeded | Pinned |
-|---|---|---|---|
-| Runner | "find a runner" | start with `LM("gpt-4o")` | must be `LM("ft:gpt-4o:triage-v3")` |
-| Adapter | auto-generate | start with this template | must use this template |
-| Via fields | "find a decomposition" | start with `[("reasoning",)]` | must use exactly these |
-| Hint | "generate one" | start with this text | must use this text |
-| Temperature | "find a value" | start with 0.3 | must be 0.0 |
+### Per-axis search control
 
-A program handed to an optimizer is naturally a seed — every value is a
-starting point, and the optimizer explores from there. The user then
-selectively pins axes they don't want changed:
+Each axis can be independently:
+
+- **Pinned** — fixed value, optimizer does not touch it.
+- **Seeded** — starting value, optimizer explores from it.
+- **Bounded** — a defined search space: a list of options, a range,
+  or a constraint.
 
 ```python
-# Everything here is a seed — optimizer starts from this program
-# but can change any axis
 seed = Program(
     module=chain_of_thought,
     runner=LM("gpt-4o", temperature=0.0),
+    adapter=XMLAdapter(),
     hint="Read the support request carefully. Consider what the customer "
          "is experiencing and which team can resolve it.",
 )
+```
 
-# Search from the seed, but pin the runner — only explore hint,
-# via fields, temperature, adapter
+The seed is the starting point. The search space says which axes the
+optimizer can change and what it can change them to:
+
+```python
+# Keep the adapter and module fixed, search over everything else
 results = optimizer.search(
     intent=triage,
     seed=seed,
-    pin=["runner"],
-)
+    space={
+        # Search over these specific models
+        "runner.model": ["gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet"],
 
-# Or pin nothing — let the optimizer change everything, even the
-# module and runner type
+        # Search within a range
+        "runner.temperature": (0.0, 1.0),
+
+        # Let the optimizer generate freely
+        "hint": Open(),
+        "via": Open(),
+    },
+    pin=["adapter", "module"],
+)
+```
+
+**Use case: compare providers.** Same model, different SDKs/providers,
+to evaluate quantization, latency, and cost differences.
+
+```python
 results = optimizer.search(
     intent=triage,
     seed=seed,
+    space={
+        "runner.provider": ["openai", "azure", "anyscale", "fireworks"],
+    },
+    pin=["runner.model", "adapter", "module", "hint", "via"],
 )
+```
 
-# Or start from scratch — no seed, everything open
+**Use case: find the best model.** Keep the cheap adapter and strategy,
+search over models.
+
+```python
 results = optimizer.search(
     intent=triage,
+    seed=seed,
+    space={
+        "runner.model": [
+            "gpt-4o-mini", "gpt-4o", "gpt-4.1",
+            "claude-3-5-sonnet", "claude-3-5-haiku",
+            "ft:gpt-4o:triage-v3",
+        ],
+    },
+    pin=["adapter", "module", "hint", "via"],
 )
+```
+
+**Use case: search everything.** No seed, no pins. The optimizer starts
+from scratch and explores all axes.
+
+```python
+results = optimizer.search(intent=triage)
 ```
 
 A checkpoint is a fully concrete program produced by the optimizer —
@@ -570,19 +618,14 @@ The general execution shape:
 - Control flow pattern (single call, loop, retry, vote, tool loop)
 - Decomposition pattern (which hidden fields to add)
 
-### On the program (each axis: open, seeded, or pinned)
+### On the program (each axis: pinned, seeded, or bounded)
 
-- Module choice
-- Runner (from "any LM" to a specific finetuned model to sklearn)
-- Adapter (auto-generated or hand-written)
-- Prompt engineering (hint text, field notes)
-- Runner parameters (temperature, model name, etc.)
-- Control flow parameters (max retries, tool list, etc.)
+Axes include: module, runner (model, provider, temperature), adapter,
+via fields, hint, notes, and control flow params (max retries, tools, n).
 
-Each axis is independently open, seeded, or pinned. A program can be
-executed directly (if concrete enough) or handed to an optimizer as a
-seed. A checkpoint is a fully concrete program — every axis has a
-specific value.
+Each axis is independently pinned, seeded with a starting value, or
+bounded to a search space. A program can be executed directly or handed
+to an optimizer as a seed. A checkpoint is a fully concrete program.
 
 ### Teaching order
 
@@ -605,8 +648,8 @@ If intent and execution strategy are cleanly separated, an optimizer can:
 
 - Hold the Signature fixed (inputs, outputs, types, examples, objective)
 - Search over modules (predict, chain_of_thought, react, custom)
-- Search over open and seeded axes (runner, adapter, via fields,
-  hint, notes, temperature, retries — whatever isn't pinned)
+- Search over seeded and bounded axes (runner, provider, model, adapter,
+  via fields, hint, notes, temperature — whatever isn't pinned)
 - Evaluate every candidate against the same fixed objective
 
 This only works if the Signature does not contain execution strategy
@@ -650,11 +693,11 @@ based on which module you use. So it belongs on the Signature:
 | Rubrics and metrics | Signature | Scoring criteria — define success |
 | Reference artifacts | Signature | Behavioral anchor |
 | Strategy pattern | Module | Execution shape — control flow, decomposition |
-| Runner | Program (axis) | "any LM" → `LM("gpt-4o")` → `LM("ft:gpt-4o:triage-v3")` → `SklearnModel(...)` |
-| Adapter | Program (axis) | Auto-generated or hand-written |
-| Hint text, field notes | Program (axis) | Auto-generated, optimizer-searched, or pinned |
-| Hidden fields | Program (axis) | Module default or custom |
-| Control flow params | Program (axis) | Retries, tool list, temperature, etc. |
+| Runner, model, provider | Program (axis) | Pinned, seeded, or bounded search space |
+| Adapter | Program (axis) | Pinned, seeded, or auto-generated |
+| Hint text, field notes | Program (axis) | Pinned, seeded, or optimizer-generated |
+| Hidden fields | Program (axis) | Module default, seeded, or optimizer-searched |
+| Control flow params | Program (axis) | Temperature, retries, tools, etc. |
 | Multi-step data flow | Graph (Layer, Model) | Composition of modules |
 | Runtime telemetry | `runtime` parameter | Not a task field |
 
@@ -666,10 +709,10 @@ The honest truth is:
   ensemble, refine — these are execution shapes. They define control
   flow and decomposition without pinning down specific parameters.
 - **A program specifies values for a module's axes.** Each axis (runner,
-  adapter, hint, via fields, temperature, etc.) is independently open,
-  seeded, or pinned. A program can be executed directly or handed to an
-  optimizer as a seed. A checkpoint is a fully concrete program. The
-  optimizer produces, evaluates, mutates, and saves programs.
+  model, provider, adapter, hint, via fields, temperature, etc.) is
+  independently pinned, seeded, or bounded to a search space. A program
+  can be executed directly or handed to an optimizer as a seed. A
+  checkpoint is a fully concrete program.
 - **A graph wires multiple modules together.** Each node has a signature
   and a module. The graph handles data flow.
 - **The optimizer test keeps the boundary clean.** If an optimizer would
