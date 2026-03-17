@@ -329,6 +329,50 @@ Each axis can be independently:
 - **Bounded** — a defined search space: a list of options, a range,
   or a constraint.
 
+`pin="all"` pins every axis the seed specifies. Axes the seed does not
+specify are open — there is nothing to pin. Use `unpin=[...]` to pin
+all specified axes except a few:
+
+```python
+seed = Program(
+    module=chain_of_thought,
+    runner=OpenAILM("gpt-4o", temperature=0.0),
+    adapter=XMLAdapter(),
+    hint="Read the support request carefully.",
+)
+# seed specifies: module, runner, adapter, hint
+# seed does NOT specify: via, notes
+# → via and notes are open regardless of pin setting
+
+# Pin everything specified, only via and notes are open (unspecified)
+results = optimizer.search(intent=triage, seed=seed)
+
+# Pin everything specified EXCEPT hint — now hint, via, notes are open
+results = optimizer.search(intent=triage, seed=seed, unpin=["hint"])
+
+# Pin nothing — every specified axis is a seed (starting point),
+# unspecified axes are open
+results = optimizer.search(intent=triage, seed=seed, pin="none")
+
+# No seed — everything is open
+results = optimizer.search(intent=triage)
+```
+
+To execute a program directly (not search), the only required axis is
+`runner`. Everything else has sensible defaults or is auto-generated:
+
+```python
+# Minimum executable program
+Program(module=predict, runner=OpenAILM("gpt-4o"))
+
+# module defaults to predict if omitted
+Program(runner=OpenAILM("gpt-4o"))
+
+# adapter auto-generated from signature fields and types
+# hint defaults to none
+# via defaults to none (module may add its own)
+```
+
 **Use case: compare LM SDKs and providers.** Same model, different
 backends, to evaluate latency, quantization, and cost.
 
