@@ -7,6 +7,9 @@ title: "Modules"
 Module functions are the second layer.
 They say **how** to execute one signature.
 
+As in the rest of Onux, the signature formula names the field flow, while
+methods on `Signature` handle types, notes, and incremental structure changes.
+
 They are plain functions:
 
 ```python

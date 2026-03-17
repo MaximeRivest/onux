@@ -50,6 +50,9 @@ from onux import (
 
 ## Signatures
 
+Signature formulas describe field names and flow. Use methods like `.type()`,
+`.note()`, `.via()`, and `.add()` to refine the structure after construction.
+
 ### `Signature`
 
 ```python

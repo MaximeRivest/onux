@@ -1,5 +1,10 @@
 # Onux docs
 
+Onux signatures use a compact formula to describe field flow, such as
+`question -> answer` or `question -> reasoning -> answer`. Field types,
+notes, and incremental structure changes are handled with methods like
+`.type()`, `.note()`, `.via()`, and `.add()`.
+
 ## Vignettes
 
 - [Vignette 1: Signatures](vignettes/01-signatures.md)

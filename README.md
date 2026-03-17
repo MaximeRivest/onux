@@ -45,6 +45,9 @@ uv run python3 -m unittest tests.test_doctests
 ## Level 1: Signatures
 
 A signature is the inner building block of Onux.
+The formula names the inputs, optional hidden fields, and outputs; types,
+notes, and additional fields are added with methods like `.type()`, `.note()`,
+`.via()`, and `.add()`.
 
 ```python
 from onux import Signature
@@ -53,7 +56,7 @@ sig = Signature("question -> answer")
 print(sig)
 ```
 
-Signatures can include one hidden stage in the formula:
+Signatures can include one hidden stage directly in the formula:
 
 ```python
 sig = Signature("question -> reasoning -> answer")

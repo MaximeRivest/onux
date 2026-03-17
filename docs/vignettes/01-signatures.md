@@ -8,6 +8,10 @@ A signature is the innermost building block in Onux.
 It says what goes in, what comes out, and optionally what the model
 should generate first as hidden scaffolding.
 
+The formula itself describes the field names and flow. Types, notes, and
+additional hidden or output fields are added with methods like `.type()`,
+`.note()`, `.via()`, and `.add()`.
+
 ```python
 import os, sys
 sys.path.insert(0, os.path.abspath("src"))
@@ -30,6 +34,9 @@ question -> answer
 ```
 
 ## Add one hidden field
+
+The formula can include one hidden stage directly, or you can add hidden
+fields incrementally with `.via()`.
 
 ```python
 sig = Signature("question -> answer").via("reasoning", note="Think step by step")
