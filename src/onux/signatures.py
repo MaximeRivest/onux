@@ -67,7 +67,6 @@ class _Objective:
 
     criteria: tuple[_ObjectiveCriterion, ...]
     weights: tuple[float, ...]
-    reduce: Literal["weighted_mean"] = "weighted_mean"
 
     def __post_init__(self) -> None:
         if not self.criteria:
@@ -78,8 +77,6 @@ class _Objective:
             raise ValueError("'weights' must have the same length as the number of objective items.")
         if any(weight <= 0.0 for weight in normalized_weights):
             raise ValueError("Objective weights must all be positive.")
-        if not _weights_sum_to_one(normalized_weights):
-            raise ValueError("Objective weights must sum to 1.0.")
         object.__setattr__(self, "weights", normalized_weights)
 
 
@@ -105,9 +102,9 @@ class Signature:
     - `inputs -> hidden -> outputs`
 
     From there you can layer in richer intent: types, notes, examples, hidden
-    intermediate fields, and numeric objectives. The object is immutable, so
-    each modifier returns a new signature. This makes it easy to start simple,
-    then add detail only when you need it.
+    intermediate fields, and numeric objectives (as metrics and rubrics). The 
+    object is immutable, so each modifier returns a new signature. This makes 
+    it easy to start simple, then add detail only when you need it.
 
     Examples
     --------
@@ -143,10 +140,13 @@ class Signature:
 
     Then attach examples and an objective to make the intended behavior more
     concrete. This is often where a signature starts to feel like a tidy little
-    specification rather than just a schema.
+    specification rather than just a schema. Metric callables typically accept
+    the signature fields they need as named parameters and return a numeric
+    score.
 
-    >>> def exact_match(answer: str, expected: str) -> float:
-    ...     return float(answer == expected)
+    >>> def single_sentence(answer: str) -> float:
+    ...     sentence_marks = answer.count(".") + answer.count("!") + answer.count("?")
+    ...     return float("\\n" not in answer and sentence_marks <= 1)
     >>> rich = (
     ...     Signature("question -> answer")
     ...     .hint("Answer in one sentence.")
@@ -155,9 +155,9 @@ class Signature:
     ...         {"question": "Capital of France", "answer": "Paris"},
     ...     ])
     ...     .objective(
-    ...         "Correct and unambiguous.",
-    ...         exact_match,
-    ...         (2 / 3, 1 / 3),
+    ...         "Assign a score from 0 to 1 for factual correctness and lack of ambiguity, where 1 means fully correct and clear and 0 means incorrect or misleading.",
+    ...         single_sentence,
+    ...         (2.0, 1.0),
     ...     )
     ... )
     >>> rich.n_examples
@@ -330,7 +330,9 @@ class Signature:
         >>> plain.objective_spec is None
         True
 
-        >>> scored = plain.objective("Correct.")
+        >>> scored = plain.objective(
+        ...     "Assign a score from 0 to 1 for factual correctness, where 1 means fully correct and 0 means clearly incorrect."
+        ... )
         >>> len(scored.objective_spec.criteria)
         1
         >>> scored.objective_spec.criteria[0].kind
@@ -578,7 +580,6 @@ class Signature:
     def objective(
         self,
         *items: str | Callable[..., Any] | tuple[float, ...],
-        reduce: Literal["weighted_mean"] = "weighted_mean",
     ) -> Signature:
         """Return a copy with a numeric objective.
 
@@ -586,7 +587,7 @@ class Signature:
 
         - a string means a rubric
         - a callable means a metric
-        - a final tuple of floats, when present, gives normalized weights
+        - a final tuple of floats, when present, gives weights
 
         When no final weight tuple is provided, all objective items receive
         equal weight.
@@ -595,19 +596,59 @@ class Signature:
         ----------
         *items : str | Callable[..., Any] | tuple[float, ...]
             Rubrics, metrics, and optionally one final weight tuple.
-        reduce : {"weighted_mean"}, default="weighted_mean"
-            Aggregation rule used when combining term scores.
 
         Returns
         -------
         Signature
             A new signature with a normalized objective attached.
 
+        Notes
+        -----
+        Rubric strings are instructions for a judge. A good rubric does not
+        merely name a quality such as "correctness" or "clarity". Instead, it
+        tells the judge what number to assign and what high and low scores mean.
+
+        In practice, rubric strings work best when they:
+
+        - specify the score range, usually 0 to 1
+        - state what a high score means
+        - state what a low score means
+        - mention the concrete behavior being judged
+
+        For example, prefer a rubric like:
+
+        >>> rubric = (
+        ...     "Assign a score from 0 to 1 for factual correctness, where 1 means fully correct "
+        ...     "and 0 means clearly incorrect."
+        ... )
+
+        over a label-like string such as ``"correctness"``.
+
+        Metric callables should accept named parameters corresponding to the
+        signature fields they need. They do not need to accept every field.
+
+        In other words, metric parameters should be chosen by field name, not
+        by position. A metric may use only outputs, or a mix of inputs,
+        hidden fields, and outputs.
+
+        Common shapes look like:
+
+        >>> def brief(answer: str) -> float:
+        ...     return float(len(answer.split()) <= 20)
+        >>> def grounded(question: str, context: str, answer: str) -> float:
+        ...     return 1.0
+
+        Metrics should return a numeric score, ideally a float from 0 to 1,
+        where higher is better. Returning `bool` is also fine when the metric
+        is naturally pass/fail.
+
         Examples
         --------
         Start with a single rubric.
 
-        >>> sig = Signature("question -> answer").objective("Correct and concise.")
+        >>> sig = Signature("question -> answer").objective(
+        ...     "Assign a score from 0 to 1 for answers that are both factually correct and concise, where higher scores indicate better performance on both dimensions."
+        ... )
         >>> len(sig.objective_spec.criteria)
         1
         >>> sig.objective_spec.criteria[0].kind
@@ -615,31 +656,32 @@ class Signature:
         >>> sig.objective_spec.weights
         (1.0,)
 
-        Add several rubrics and provide a final normalized weight tuple.
+        Add several rubrics and provide a final weight tuple.
 
         >>> weighted = Signature("question -> answer").objective(
-        ...     "Factually correct.",
-        ...     "Easy to read.",
-        ...     (0.75, 0.25),
+        ...     "Assign a score from 0 to 1 for factual correctness, where 1 means fully correct and 0 means clearly incorrect.",
+        ...     "Assign a score from 0 to 1 for clarity and structure, where 1 means easy to read and well organized and 0 means confusing or poorly structured.",
+        ...     (3.0, 1.0),
         ... )
         >>> weighted.objective_spec.weights
-        (0.75, 0.25)
+        (3.0, 1.0)
 
         Mix rubrics with Python metrics.
 
-        >>> def exact_match(answer: str, expected: str) -> float:
-        ...     return float(answer == expected)
+        >>> def single_sentence(answer: str) -> float:
+        ...     sentence_marks = answer.count(".") + answer.count("!") + answer.count("?")
+        ...     return float("\\n" not in answer and sentence_marks <= 1)
         >>> mixed = Signature("question -> answer").objective(
-        ...     "Answers the user's question.",
-        ...     exact_match,
-        ...     (2 / 3, 1 / 3),
+        ...     "Assign a score from 0 to 1 for how directly the answer addresses the user's question, where 1 means fully direct and 0 means off-topic or evasive.",
+        ...     single_sentence,
+        ...     (2.0, 1.0),
         ... )
         >>> [criterion.kind for criterion in mixed.objective_spec.criteria]
         ['rubric', 'metric']
-        >>> mixed.objective_spec.criteria[1].spec is exact_match
+        >>> mixed.objective_spec.criteria[1].spec is single_sentence
         True
         """
-        objective = _normalize_objective_items(items, reduce=reduce)
+        objective = _normalize_objective_items(items)
         return Signature(
             _fields=self._fields,
             hint=self._hint,
@@ -663,10 +705,16 @@ class Signature:
         Signature
             A new signature with a one-rubric objective.
 
+        Notes
+        -----
+        A rubric string should read like scoring guidance for a judge, not just
+        like a short label. It is usually best to say what score range to use
+        and what high and low scores mean.
+
         Examples
         --------
         >>> sig = Signature("question -> answer").rubric(
-        ...     "Correct, direct, and avoids unnecessary detail.",
+        ...     "Assign a score from 0 to 1 for answers that are correct, direct, and free of unnecessary detail, where 1 means the answer fully satisfies all three criteria."
         ... )
         >>> len(sig.objective_spec.criteria)
         1
@@ -846,7 +894,7 @@ class Signature:
         ...     Signature("question -> answer")
         ...     .hint("Answer briefly.")
         ...     .examples([{"question": "2 + 2", "answer": "4"}])
-        ...     .rubric("Correct.")
+        ...     .rubric("Assign a score from 0 to 1 for factual correctness, where 1 means fully correct and 0 means clearly incorrect.")
         ...     .dump_state()
         ... )
         >>> state['formula']
@@ -878,7 +926,6 @@ class Signature:
             ],
             "examples": self._examples.to_records() if self._examples is not None else None,
             "objective": None if self._objective is None else {
-                "reduce": self._objective.reduce,
                 "weights": list(self._objective.weights),
                 "criteria": [
                     {
@@ -918,7 +965,7 @@ class Signature:
         ...     .hint("Answer and include confidence.")
         ...     .type(confidence=float)
         ...     .examples([{"question": "2 + 2", "answer": "4", "confidence": 0.99}])
-        ...     .rubric("Correct and calibrated.")
+        ...     .rubric("Assign a score from 0 to 1 for answers that are both correct and well calibrated, where higher scores require both accurate content and appropriate confidence.")
         ... )
         >>> restored = Signature.load_state(original.dump_state())
         >>> restored.formula
@@ -940,18 +987,12 @@ class Signature:
         objective = None
         if objective_state is not None:
             criterion_states = objective_state.get("criteria")
-            legacy_state = criterion_states is None
             if criterion_states is None:
                 criterion_states = objective_state.get("terms", [])
 
             weights_state = objective_state.get("weights")
             if weights_state is None:
                 weights_state = [criterion.get("weight", 1.0) for criterion in criterion_states]
-
-            if legacy_state:
-                weights = _normalize_legacy_weights(weights_state)
-            else:
-                weights = tuple(float(weight) for weight in weights_state)
 
             objective = _Objective(
                 criteria=tuple(
@@ -961,8 +1002,7 @@ class Signature:
                     )
                     for criterion in criterion_states
                 ),
-                weights=weights,
-                reduce=objective_state.get("reduce", "weighted_mean"),
+                weights=_coerce_weights(weights_state),
             )
 
         return cls(_fields=tuple(fields), hint=state["hint"], _examples=examples, _objective=objective)
@@ -1075,31 +1115,18 @@ def _type_name(tp: Any) -> str:
 
 
 
-def _weights_sum_to_one(weights: tuple[float, ...], *, tol: float = 1e-9) -> bool:
-    return abs(sum(weights) - 1.0) <= tol
-
-
-
 def _equal_weights(count: int) -> tuple[float, ...]:
-    return tuple(1.0 / count for _ in range(count))
+    return tuple(1.0 for _ in range(count))
 
 
 
-def _normalize_legacy_weights(weights: Any) -> tuple[float, ...]:
-    normalized = tuple(float(weight) for weight in weights)
-    if not normalized:
-        return normalized
-    total = sum(normalized)
-    if total <= 0.0:
-        raise ValueError("Objective weights must sum to a positive value.")
-    return tuple(weight / total for weight in normalized)
+def _coerce_weights(weights: Any) -> tuple[float, ...]:
+    return tuple(float(weight) for weight in weights)
 
 
 
 def _normalize_objective_items(
     items: tuple[str | Callable[..., Any] | tuple[float, ...], ...],
-    *,
-    reduce: Literal["weighted_mean"] = "weighted_mean",
 ) -> _Objective:
     if not items:
         raise ValueError("Provide at least one rubric or metric.")
@@ -1129,7 +1156,7 @@ def _normalize_objective_items(
     elif len(weights) != len(criteria):
         raise ValueError("The final weight tuple must have the same length as the number of rubrics and metrics.")
 
-    return _Objective(tuple(criteria), weights=weights, reduce=reduce)
+    return _Objective(tuple(criteria), weights=weights)
 
 
 
