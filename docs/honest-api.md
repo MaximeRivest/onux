@@ -373,6 +373,97 @@ Program(runner=OpenAILM("gpt-4o"))
 # via defaults to none (module may add its own)
 ```
 
+### Introspection: runners, modules, and adapters are self-describing
+
+Runners, modules, and adapters report their own axes, defaults, and
+valid ranges. This is how users discover what is configurable and how
+the optimizer knows what to search over.
+
+```python
+>>> OpenAILM.axes()
+{
+    "model":       Axis(type=str, default="gpt-4o", choices=["gpt-4o", "gpt-4o-mini", "gpt-4.1", ...]),
+    "temperature": Axis(type=float, default=1.0, range=(0.0, 2.0)),
+    "max_tokens":  Axis(type=int, default=4096, range=(1, 128000)),
+    "top_p":       Axis(type=float, default=1.0, range=(0.0, 1.0)),
+}
+
+>>> AnthropicLM.axes()
+{
+    "model":       Axis(type=str, default="claude-3-5-sonnet", choices=["claude-3-5-sonnet", "claude-3-5-haiku", ...]),
+    "temperature": Axis(type=float, default=1.0, range=(0.0, 1.0)),
+    "max_tokens":  Axis(type=int, default=4096, range=(1, 200000)),
+}
+
+>>> YOLORunner.axes()
+{
+    "weights":     Axis(type=str, default="yolov8x.pt", choices=["yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolov8x.pt"]),
+    "conf_thresh": Axis(type=float, default=0.25, range=(0.0, 1.0)),
+    "iou_thresh":  Axis(type=float, default=0.45, range=(0.0, 1.0)),
+    "device":      Axis(type=str, default="cuda", choices=["cpu", "cuda"]),
+}
+
+>>> SklearnRunner.axes()
+{
+    "model_path":  Axis(type=str, required=True),
+}
+```
+
+Modules do the same:
+
+```python
+>>> chain_of_thought.axes()
+{
+    "hint": Axis(type=str, default=None),
+    "via":  Axis(type=list, default=[("reasoning",)]),
+}
+
+>>> react.axes()
+{
+    "hint":      Axis(type=str, default=None),
+    "via":       Axis(type=list, default=[("reasoning",)]),
+    "tools":     Axis(type=list, required=True),
+    "max_iter":  Axis(type=int, default=5, range=(1, 20)),
+}
+
+>>> ensemble.axes()
+{
+    "n": Axis(type=int, default=3, range=(1, 20)),
+}
+
+>>> tile_and_merge.axes()
+{
+    "tile_size":  Axis(type=int, default=640, range=(320, 1280)),
+    "overlap":    Axis(type=float, default=0.2, range=(0.0, 0.5)),
+}
+```
+
+A program combines the axes of its runner and module, and shows current
+values against defaults:
+
+```python
+>>> program = Program(
+...     module=chain_of_thought,
+...     runner=OpenAILM("gpt-4o", temperature=0.0),
+... )
+>>> program.axes()
+{
+    # Module axes
+    "hint": Axis(value=None, default=None),
+    "via":  Axis(value=[("reasoning",)], default=[("reasoning",)]),
+    # Runner axes
+    "runner.model":       Axis(value="gpt-4o", default="gpt-4o"),
+    "runner.temperature": Axis(value=0.0, default=1.0),
+    "runner.max_tokens":  Axis(value=4096, default=4096),
+    "runner.top_p":       Axis(value=1.0, default=1.0),
+    # Adapter axes
+    "adapter": Axis(value="auto", default="auto"),
+}
+```
+
+The optimizer uses these axis descriptions to know what it can search,
+what the valid ranges are, and where the defaults sit.
+
 **Use case: compare LM SDKs and providers.** Same model, different
 backends, to evaluate latency, quantization, and cost.
 
