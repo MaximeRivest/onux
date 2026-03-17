@@ -1,599 +1,344 @@
-# Honest API: intent, program, objective, evaluator
+# Honest API: intent, strategy, composition
 
-This note proposes a cleaner and more honest mental model for Onux.
-
-The short version is:
-
-- we are **not** only building an intent API
-- we are also building a **program / protocol API**
-- those two concerns should be named separately
-
-The biggest clue is hidden fields. They are useful, but they are already a
-choice about decomposition, supervision, and execution strategy. That means
-hidden fields are not pure intent.
-
-## The problem we ran into
-
-We started with a simple story:
-
-- a signature says what goes in and what comes out
-- examples, rubrics, and metrics express intended behavior
-
-But then hidden fields appeared:
-
-- `question -> reasoning -> answer`
-- `question -> evidence -> answer`
-- `question -> plan -> answer`
-
-These are not just descriptions of the same task. They are already claims
-about **how the task should be carried out**.
-
-That is useful, but it is no longer only "intent".
-
-Then evaluation and runtime concerns started leaking in too:
-
-- metric execution
-- rubric judging
-- runtime telemetry like cost and latency
-- judge LMs and adapters
-- evaluation aggregation
-
-At that point the old story becomes muddy.
-
-## The honest mental model
-
-Onux should distinguish four layers:
-
-1. **Intent** — the behavioral contract we care about
-2. **Program** — one declared protocol / decomposition for implementing that intent
-3. **Objective** — how we score behavior
-4. **Evaluator** — how scoring is actually executed
-
-This gives us a much cleaner way to explain the system.
+This note clarifies the design of Onux by being honest about what each
+layer actually does and where each concern belongs.
 
 ---
 
-## 1. Intent
+## The optimizer test
 
-`Intent` is the true high-level behavioral target.
+The cleanest way to decide whether something is intent or execution
+strategy is to ask:
 
-It should contain the things that ought to remain stable across many possible
-implementations:
+> Would an optimizer change this?
 
-- inputs
-- outputs
-- types and notes
-- examples
-- metrics
-- rubrics
-- external artifact being imitated or replaced
+If yes, it is execution strategy. If no, it is intent.
 
-A key property of `Intent` is that it should survive changes in execution
-strategy.
+- **Input and output fields**: no, these define the task. Intent.
+- **Types and notes**: no, these constrain the behavioral contract. Intent.
+- **Examples**: no, these anchor the target behavior. Intent.
+- **Objective (rubrics and metrics)**: no, these define success. Intent.
+- **Hidden/Intermediary fields (`.via("reasoning")`)**: yes, an optimizer might add,
+  remove, rename, or reorder them. Execution strategy.
+  **Order of input/output fields**: yes, an optimizer might change the order. Execution strategy.
+- **Module choice (predict, chain_of_thought, react)**: yes, an optimizer
+  might swap one for another. Execution strategy.
+- **LM choice, adapter, temperature**: yes. Execution strategy.
 
-This is also where `Artifact` belongs. Here, an artifact is not an internal
-program artifact like `reasoning` or `draft_answer`. It is a **reference
-artifact**: an external system, binary, service, workflow, or model whose
-behavior helps define the target we care about. That makes it part of intent,
-not part of execution strategy. A reference artifact can anchor examples,
-serve as an example generator, and provide a concrete behavioral baseline for
-training, evaluation, migration, or replacement.
+This gives us a clean separation:
 
-These should all be different ways to satisfy the **same** intent:
-
-- answer directly
-- retrieve then answer
-- reason then answer
-- plan then execute
-- use tools in a loop
-
-### Proposed API
-
-```python
-from typing import Literal
-from onux import Artifact, Intent
-
-
-Severity = Literal["low", "medium", "high", "critical"]
-Team = Literal["billing", "bug", "feature", "account"]
-
-
-def valid_triage(severity: Severity, team: Team, customer_visible: bool) -> float:
-    return float(
-        severity in {"low", "medium", "high", "critical"}
-        and team in {"billing", "bug", "feature", "account"}
-        and isinstance(customer_visible, bool)
-    )
-
-
-intent = (
-    Intent("support_request -> severity, team, customer_visible")
-    .type(
-        severity=Severity,
-        team=Team,
-        customer_visible=bool,
-    )
-    .note(
-        severity="Operational urgency of the request.",
-        team="Owning team that should handle the request.",
-        customer_visible="Whether the issue is visible to the customer right now.",
-    )
-    .examples([
-        {
-            "support_request": "I was charged twice for my subscription this month.",
-            "severity": "high",
-            "team": "billing",
-            "customer_visible": True,
-        },
-        {
-            "support_request": "The export button is misaligned in dark mode.",
-            "severity": "low",
-            "team": "bug",
-            "customer_visible": True,
-        },
-    ])
-    .artifact(Artifact.service("legacy-support-triage"))
-    .objective(
-        "Assign a score from 0 to 1 for routing accuracy, where 1 means the request is assigned to the correct team and severity and 0 means the routing is clearly wrong.",
-        "Assign a score from 0 to 1 for operational usefulness, where 1 means the triage output would be immediately useful to a support organization and 0 means it would cause confusion or delays.",
-        valid_triage,
-        (4.0, 2.0, 1.0),
-    )
-)
-```
-
-The important point is that this says **what good behavior looks like**, not
-how the system internally gets there. It includes stable behavioral structure
-(inputs, outputs, types, notes), reference examples, scoring criteria
-(rubrics and metrics), and even an external artifact whose behavior we may be
-trying to imitate or replace.
-
-This example also shows why typed outputs are often genuinely useful: they
-make parsing and downstream use part of the behavioral contract. Here the
-program is not just producing prose; it must emit structured values that other
-systems can reliably consume. Typed inputs are often less interesting for raw user text.
+- **Signature = intent.** What the task is, what good looks like. In other words
+  elements in the signature are not parameters to optimize over — they are the fixed target the optimizer holds constant while it searches over execution strategies.
+- **Module = execution strategy.** How to fulfill the signature, including
+  what intermediate fields to generate.
 
 ---
 
-## 2. Program
+## Level 1: Intent (Signature)
 
-`Program` is the protocol-level object.
-
-It is where we admit that the user may want to declare intermediate artifacts,
-inspection points, decomposition boundaries, and execution-facing structure.
-
-This is where hidden fields really belong.
-
-### Program is not pure intent
-
-If a user writes:
+A Signature is the behavioral target. It contains only things the optimizer
+holds fixed:
 
 ```python
-question -> reasoning -> answer
-```
-
-that is not just a behavioral claim. It is also a program-structure claim.
-So it belongs in `Program`, not in the pure intent object.
-
-### Proposed API
-
-```python
-from onux import Program
-
-program = (
-    Program(intent)
-    .artifact("retrieved_context", list[str], note="Retrieved passages")
-    .artifact("draft_answer", str, note="Initial answer before revision")
-    .artifact("reasoning", str, note="Inspectable reasoning trace")
-)
-```
-
-Here `artifact(...)` means an intermediate declared artifact of the program.
-
-These artifacts are useful because if we remove them entirely, users will just
-hack them into outputs. So the feature is legitimate; it just belongs to the
-program layer, not the pure intent layer.
-
-### What counts as a program artifact?
-
-Good examples:
-
-- `reasoning`
-- `evidence`
-- `plan`
-- `retrieved_context`
-- `draft_answer`
-- `chosen_tool`
-
-These are all intermediate artifacts of one chosen strategy.
-
-### What does **not** count as a program artifact?
-
-Things like:
-
-- `latency_ms`
-- `cost_usd`
-- `prompt_tokens`
-- `completion_tokens`
-- `retry_count`
-
-Those are **runtime telemetry**, not declared task or program artifacts.
-
----
-
-## 3. Objective
-
-`Objective` is the scoring specification.
-
-It is not a signature, and it is not an evaluator.
-It only says **how success should be judged**.
-
-We can keep the lightweight API shape we converged on:
-
-- `str` = rubric
-- `callable` = metric
-- final `tuple` = relative weights
-
-### Proposed API
-
-```python
-from onux import Objective
-
-
-def single_sentence(answer: str) -> float:
-    sentence_marks = answer.count(".") + answer.count("!") + answer.count("?")
-    return float("\n" not in answer and sentence_marks <= 1)
-
-
-objective = Objective(
-    "Assign a score from 0 to 1 for factual correctness, where 1 means fully correct and 0 means clearly incorrect.",
-    "Assign a score from 0 to 1 for directness, where 1 means the answer directly addresses the user's question and 0 means it is evasive or off-topic.",
-    single_sentence,
-    (4.0, 2.0, 1.0),
-)
-```
-
-### Rubrics
-
-A rubric is not just a label like `"correctness"`.
-A rubric should tell the judge:
-
-- what score range to use
-- what high scores mean
-- what low scores mean
-- what concrete behavior is being judged
-
-So rubric strings should read like scoring instructions.
-
-### Metrics
-
-Metrics are executable Python functions.
-
-They bind by **parameter name**, not by position.
-They may ask for:
-
-- any named intent or program field they need
-- the reserved parameter `runtime` for execution telemetry
-
-Examples:
-
-```python
-def brief(answer: str) -> float:
-    return float(len(answer.split()) <= 20)
-
-
-def grounded(question: str, retrieved_context: list[str], answer: str) -> float:
-    return 1.0
-
-
-def cheap(runtime) -> float:
-    return max(0.0, min(1.0, 1.0 - runtime.cost_usd / 0.05))
-```
-
-### Weights
-
-Weights are relative parts, not normalized probabilities.
-
-So all of these mean the same relative tradeoff:
-
-- `(2.0, 1.0)`
-- `(20.0, 10.0)`
-- `(0.2, 0.1)`
-
-The user should think of weights as:
-
-> how much each criterion matters relative to the others
-
----
-
-## 4. Evaluator
-
-`Evaluator` is where scoring actually happens.
-
-This is where runtime, judges, adapters, rendering, and aggregation belong.
-That keeps them out of `Intent` and `Program`.
-
-### Proposed API
-
-```python
-from onux import Evaluator
-
-
-evaluator = Evaluator(meta_lm=judge_lm)
-
-result = evaluator.evaluate(
-    intent=intent,
-    program=program,
-    objective=objective,
-    values={
-        "question": "Capital of France",
-        "answer": "Paris",
-        "retrieved_context": ["Paris is the capital of France."],
-        "draft_answer": "Paris.",
-        "reasoning": "The capital city of France is Paris.",
-    },
-    runtime=runtime,
-)
-```
-
-The evaluator should:
-
-- execute metrics directly
-- evaluate rubrics through a judge
-- expose runtime telemetry through `runtime`
-- aggregate all criterion scores with the objective weights
-
----
-
-## Judge: the recursive part
-
-Rubrics are executable only through a judge.
-
-Conceptually, a judge is itself another semantic program. So yes, rubric
-judging is recursive.
-
-But that recursion should stay behind a very small public interface.
-
-### Public judge protocol
-
-```python
-judge(rubric: str, values: dict, *, runtime=None, intent=None, program=None) -> float
-```
-
-Internally, that judge may itself be implemented with:
-
-- an LM
-- an adapter
-- prompt rendering
-- another signature/program
-- another evaluator
-
-That is fine. The key is that users should not need to think about that
-recursion unless they are customizing the judge.
-
-### Default judge
-
-A default evaluator can simply require a meta/judge LM:
-
-```python
-evaluator = Evaluator(meta_lm=judge_lm)
-```
-
-Then rubric strings are automatically turned into judge calls.
-
-Users can also provide their own judge implementation if they want custom
-behavior.
-
----
-
-## Artifact: imitating or replacing a black box
-
-There is one more important piece of true intent that is not captured by input,
-output, examples, rubrics, and metrics alone.
-
-Sometimes the real goal is:
-
-> imitate, replace, or stand in for an existing artifact
-
-Examples:
-
-- a binary
-- a legacy service
-- a human workflow
-- a prompt pipeline
-- an old model
-
-This deserves a first-class place in the intent layer.
-
-An `Artifact` is not an intermediate program artifact like `reasoning` or
-`draft_answer`. It is a **reference artifact**: an external thing whose
-behavior helps define the target we are trying to match, replace, or exceed.
-That makes it part of behavioral intent, not part of execution strategy. In
-practice, an artifact can guide dataset construction, evaluation, migration,
-and system acceptance even when it is never called at runtime.
-
-### Proposed API
-
-```python
-from onux import Artifact
-
-intent = (
-    Intent("stdin -> stdout")
-    .artifact(Artifact.binary("legacy_qa", path="/usr/local/bin/qa_tool"))
-)
-```
-
-Or more abstractly:
-
-```python
-intent = (
-    Intent("request -> response")
-    .artifact(Artifact.service("legacy-payments-api"))
-)
-```
-
-This says that the intended behavior is anchored to some external reference
-artifact, not only to a few examples.
-
-That is a real kind of intent and should be modeled honestly.
-
----
-
-## Putting it all together
-
-A realistic end-to-end example:
-
-```python
-from onux import Intent, Program, Objective, Evaluator
-
-
-def single_sentence(answer: str) -> float:
-    sentence_marks = answer.count(".") + answer.count("!") + answer.count("?")
-    return float("\n" not in answer and sentence_marks <= 1)
-
-
-def cheap(runtime) -> float:
-    return max(0.0, min(1.0, 1.0 - runtime.cost_usd / 0.05))
-
-
-intent = (
-    Intent("question -> answer")
+sig = (
+    Signature("question -> answer")
+    .type(answer=str)
+    .note(answer="Short factual answer")
     .hint("Answer in one sentence.")
     .examples([
         {"question": "2 + 2", "answer": "4"},
         {"question": "Capital of France", "answer": "Paris"},
     ])
-)
-
-program = (
-    Program(intent)
-    .artifact("retrieved_context", list[str], note="Retrieved passages")
-    .artifact("draft_answer", str, note="Initial answer before revision")
-)
-
-objective = Objective(
-    "Assign a score from 0 to 1 for factual correctness, where 1 means fully correct and 0 means clearly incorrect.",
-    "Assign a score from 0 to 1 for overall usefulness, where 1 means the answer is helpful and appropriately framed for the user and 0 means it is unhelpful or poorly framed.",
-    single_sentence,
-    cheap,
-    (4.0, 2.0, 1.0, 1.0),
-)
-
-result = Evaluator(meta_lm=judge_lm).evaluate(
-    intent=intent,
-    program=program,
-    objective=objective,
-    values={
-        "question": "Capital of France",
-        "answer": "Paris",
-        "retrieved_context": ["Paris is the capital of France."],
-        "draft_answer": "Paris is the capital of France.",
-    },
-    runtime=runtime,
+    .objective(
+        "Assign a score from 0 to 1 for factual correctness.",
+        single_sentence,
+        (2.0, 1.0),
+    )
 )
 ```
 
-This example is honest about all four layers:
+No `.via()`. No hidden fields. No execution strategy. Just: what goes in,
+what comes out, what good looks like.
 
-- `Intent` says what behavior we care about
-- `Program` says what intermediate artifacts we expose
-- `Objective` says how success is judged
-- `Evaluator` says how judging is carried out
+### How little can you specify?
 
----
+The Signature API should let the user specify only what they know, and
+infer the rest. The progression from minimal to fully explicit:
 
-## Recommended naming direction
+**Scored examples only.** The most minimal useful intent. Input columns,
+output columns, and types can all be inferred from the data. A sota model
+can generate rubrics, notes, and hint text from the examples.
 
-If we adopt this model, the old name `Signature` is no longer the best name for
-the richer object.
+```python
+sig = Signature(
+    examples=[
+        {"question": "2 + 2", "answer": "4", "_score": 1.0},
+        {"question": "Capital of France", "answer": "Paris", "_score": 1.0},
+        {"question": "Largest planet", "answer": "Earth", "_score": 0.0},
+    ]
+)
+```
 
-Two reasonable paths are:
+**Formula + examples.** The user knows the field names but lets types and
+notes be inferred.
 
-### Path A: keep `Signature`, but admit it is program-facing
+```python
+sig = Signature(
+    "question -> answer",
+    examples=[
+        {"question": "2 + 2", "answer": "4"},
+        {"question": "Capital of France", "answer": "Paris"},
+    ],
+)
+```
 
-Then the docs should say:
+**Formula + types + notes + objective.** Fully explicit intent. Nothing
+left to infer.
 
-> A `Signature` is a semantic program interface, not only a pure intent spec.
+```python
+sig = (
+    Signature("question -> answer")
+    .type(answer=str)
+    .note(answer="Short factual answer")
+    .hint("Answer in one sentence.")
+    .examples([...])
+    .objective("rubric...", metric_fn, (2.0, 1.0))
+)
+```
 
-This is acceptable, but less clean.
+At every level, the user specifies what they can, and the system fills in
+the rest. The result is always a complete behavioral target that can be
+evaluated against.
 
-### Path B: split the concepts explicitly
+### Reference artifacts
 
-- `Intent` for pure behavioral intent
-- `Program` for protocol / decomposition / artifacts
+Sometimes the real goal is to imitate or replace an existing system. A
+reference artifact is part of intent: it anchors the target behavior to
+something concrete.
 
-This is the cleaner long-term direction.
+```python
+sig = (
+    Signature("support_request -> severity, team")
+    .artifact(legacy_triage_service)
+)
+```
 
----
-
-## Practical guidance for users
-
-If we adopt this mental model, users should ask themselves:
-
-### Is this part of the stable behavioral target?
-Put it in **Intent**.
-
-Examples:
-
-- inputs
-- outputs
-- examples
-- rubrics
-- metrics
-- external artifact being imitated
-
-### Is this part of one chosen decomposition or protocol?
-Put it in **Program**.
-
-Examples:
-
-- reasoning
-- evidence
-- plan
-- draft answer
-- retrieved context
-
-### Is this part of how scoring is executed?
-Put it in **Evaluator**.
-
-Examples:
-
-- judge LM
-- adapters
-- prompt rendering
-- runtime telemetry
-- score aggregation
-
-### Is this part of success criteria?
-Put it in **Objective**.
-
-Examples:
-
-- factual correctness rubric
-- directness rubric
-- latency metric
-- cost metric
-- relative weights
+An artifact can serve as an example generator, a behavioral baseline for
+evaluation, or a concrete definition of "what good looks like" beyond
+what a few examples can capture. It is intent, not execution strategy,
+because the optimizer holds it fixed.
 
 ---
 
-## Proposed minimal next step
+## Level 2: Execution strategy (Modules)
 
-The smallest honest next step is:
+A module takes any signature and fulfills it. The contract is always:
 
-1. keep current lightweight `Objective` syntax
-2. introduce `Intent`
-3. move hidden fields / intermediate artifacts to `Program`
-4. move `.evaluate(...)` off the current signature object and onto `Evaluator`
-5. allow a default LM-backed judge, plus custom judges
+```python
+(sig, inputs, *, lm, adapter) -> dict
+```
 
-This would preserve most of the good ergonomic work while giving users a much
-clearer mental model.
+The module decides HOW to produce the outputs. This is where hidden fields
+live — the module adds them internally as part of its strategy.
+
+### Pure generation strategies
+
+These modules augment the signature with hidden fields, then predict.
+
+**chain_of_thought**: Takes the signature, internally adds
+`.via("reasoning")`, calls predict. The LM sees the reasoning field and
+fills it before filling the outputs. The user never writes `.via()` — the
+module handles it.
+
+Any module that works by adding hidden fields is in this category. You
+could write `plan_first` (adds `.via("plan")`), `evidence_then_answer`
+(adds `.via("evidence")`), etc. They all augment the signature and predict.
+
+### Pure procedural strategies
+
+These modules wrap predict in control flow without changing the signature.
+
+**ensemble**: Calls predict N times, votes across the results. The
+signature and each LM call are unchanged — only the surrounding code
+differs.
+
+**fallback**: Tries one module, catches failure, falls back to another.
+Pure error handling.
+
+**refine**: Calls predict, runs a validator, retries on failure. The
+validation and retry loop are procedural. The signature is not augmented.
+
+### Mixed strategies
+
+These modules augment the signature AND run code between LM calls.
+
+**react**: Adds `.via("reasoning")`, then enters a tool loop. Calls the
+LM, parses a tool action, executes the tool, injects the observation,
+repeats. Both generation strategy (hidden fields) and procedural code
+(tool loop).
+
+**code_exec**: Adds a code field, then runs a generate-lint-fix loop.
+Both generation strategy and procedural code.
+
+### Exotic strategies
+
+At the far end, strategies that deeply interleave code with LM execution.
+
+**Streaming token detection**: The LM streams tokens. Code monitors the
+stream, detects a pattern, pauses generation, runs external code, injects
+results, resumes via assistant prefill.
+
+**Multi-model orchestration**: One LM generates a plan. Code dispatches
+subtasks to different LMs. Results are collected and merged.
+
+### The spectrum is smooth
+
+A user can move along this spectrum incrementally:
+
+1. Start with `predict`. The signature's output fields are filled by one
+   LM call.
+
+2. Switch to `chain_of_thought` when you want the module to add a
+   reasoning step. Still one predict call, but the signature is augmented
+   internally.
+
+3. Wrap in `ensemble` or `refine` when you want reliability through
+   repetition. Pure procedural — the predict call is unchanged.
+
+4. Switch to `react` when you need tool calls. Now the module both
+   augments the signature and runs procedural code between LM calls.
+
+5. Write a custom module when you need streaming detection, prefill
+   tricks, or any other exotic strategy.
+
+At every level, the contract is the same. The signature says WHAT to
+produce. The module says HOW to produce it. The optimizer can swap
+modules freely because the intent is fixed.
 
 ---
 
-## One-sentence summary
+## Level 3: Composition (Graphs)
 
-Onux should treat **behavioral intent**, **program structure**, **scoring
-criteria**, and **evaluation execution** as separate concepts, because users
-need all four, and pretending they are one thing makes the API muddy.
+Wire multiple steps together when the task needs several module calls,
+retrieval, SQL execution, or reusable subgraphs.
+
+```python
+question = Input("question")
+context = Retrieve()(question)
+answer = Generate("answer")([question, context])
+model = Model(inputs=question, outputs=answer)
+```
+
+Each node in the graph has an inner signature and a module. The graph
+handles data flow between nodes.
+
+---
+
+## What this means for `.via()`
+
+`.via()` stays on Signature as a method — modules need it internally to
+augment signatures as part of their strategy. But users should not need
+to call `.via()` themselves in the normal case.
+
+The teaching order is:
+
+1. **Specify intent.** Write a Signature with inputs, outputs, examples,
+   and objective. No `.via()`.
+
+2. **Choose a module.** The module adds whatever hidden fields it needs.
+   `chain_of_thought` adds reasoning. `react` adds reasoning and a tool
+   loop. The user picks the strategy, not the intermediate fields.
+
+3. **Wire a graph** if the task needs multiple steps.
+
+If a power user wants to manually add `.via("my_custom_field")` to a
+signature and pass it to `predict`, they can. But the primary path should
+be: specify intent, choose module, let the module handle decomposition.
+
+### Why this matters for optimization
+
+If intent and execution strategy are cleanly separated, an optimizer can:
+
+- Hold the Signature fixed (inputs, outputs, examples, objective)
+- Search over modules (predict vs chain_of_thought vs react vs custom)
+- Search over module parameters (which hidden fields, how many retries)
+- Search over LMs, adapters, temperatures
+- Evaluate every candidate against the same fixed objective
+
+This only works if the Signature does not contain execution strategy
+decisions. The moment `.via("reasoning")` is part of the user's intent
+specification, the optimizer cannot freely remove it without changing
+what the user asked for.
+
+---
+
+## What does not belong in a Signature
+
+### Runtime telemetry
+
+Values like `latency_ms`, `cost_usd`, `prompt_tokens`, `retry_count` are
+not task fields. They are execution telemetry. Metrics can ask for a
+`runtime` parameter, and `.evaluate()` accepts a `runtime` keyword.
+
+### Judge LMs and adapters
+
+How rubrics get scored is an evaluation execution concern. The signature
+says *what* to score. A future `Evaluator` helper could automate rubric
+judging with a judge LM, but that does not need to change the Signature.
+
+### Prompt rendering
+
+How the signature is rendered into a prompt string is the adapter's job.
+The signature describes the semantic structure. The adapter presents it
+to a specific LM.
+
+### Hidden fields
+
+Hidden fields are execution strategy. They belong in modules, not in the
+user's intent specification. `.via()` exists on Signature as a building
+block for modules, not as a primary user-facing API for intent.
+
+---
+
+## The Objective stays on the Signature
+
+The objective is intent, not execution strategy. A rubric like "score
+factual correctness" defines what good looks like — it does not change
+based on which module you use. So it belongs on the Signature:
+
+- Metric parameter names are validated against the signature's fields.
+- Serialization via `dump_state()` / `load_state()` naturally includes it.
+- One object to build, pass around, and inspect.
+
+---
+
+## Summary
+
+| Concept | Where it lives | Why |
+|---|---|---|
+| Inputs, outputs, types, notes | Signature | Behavioral intent — optimizer holds fixed |
+| Examples | Signature | Behavioral specification |
+| Rubrics and metrics | Signature | Scoring criteria — define success |
+| Reference artifacts | Signature | Behavioral anchor |
+| Hidden intermediate fields | Module (internally) | Execution strategy — optimizer searches over |
+| Module choice | Module | Execution strategy |
+| LM, adapter, temperature | Module / graph config | Execution strategy |
+| Multi-step data flow | Graph (Layer, Model) | Composition of modules |
+| Runtime telemetry | `runtime` parameter | Not a task field |
+| Prompt rendering | Adapter | Presentation, not semantics |
+
+The honest truth is:
+
+- **A Signature says WHAT to produce.** Inputs, outputs, types, notes,
+  examples, objective. It is the behavioral target the optimizer holds
+  fixed.
+- **A module says HOW to produce it.** Modules range from pure generation
+  strategies (chain-of-thought: internally add reasoning, predict) to
+  pure procedural strategies (ensemble: repeat predict, vote) to mixed
+  strategies (ReAct: add reasoning, run a tool loop) to exotic strategies
+  (streaming detection, prefill manipulation). The spectrum is smooth.
+  Hidden fields belong here.
+- **A graph wires multiple modules together.** Each node has a signature
+  and a module. The graph handles data flow.
+- **The optimizer test keeps the boundary clean.** If an optimizer would
+  change it, it is execution strategy. If not, it is intent.
