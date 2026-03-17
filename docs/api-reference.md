@@ -471,21 +471,6 @@ question -> answer
   ← answer    str
 ```
 
-### `.rubric()`
-
-```python
-print(Signature("question -> answer").rubric("Correct and concise."))
-```
-
-```output
-question -> answer
-  'Given `question`, produce `answer`.'
-  objective:
-    - Correct and concise.
-  → question  str
-  ← answer    str
-```
-
 ### `.dump_state()` / `.load_state()`
 
 ```python

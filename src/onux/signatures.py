@@ -624,6 +624,11 @@ class Signature:
 
         over a label-like string such as ``"correctness"``.
 
+        Weights are relative parts, not normalized probabilities. They do not
+        need to sum to 1. For example, ``(4.0, 2.0, 1.0)`` means the first
+        objective item counts twice as much as the second and four times as
+        much as the third.
+
         Metric callables should accept named parameters corresponding to the
         signature fields they need. They do not need to accept every field.
 
@@ -680,6 +685,30 @@ class Signature:
         ['rubric', 'metric']
         >>> mixed.objective_spec.criteria[1].spec is single_sentence
         True
+
+        You can also build a more realistic five-axis objective that mixes two
+        judge-written rubrics with three programmatic metrics.
+
+        >>> def cheap(price_usd: float) -> float:
+        ...     return max(0.0, min(1.0, 1.0 - price_usd / 10.0))
+        >>> def low_latency(latency_ms: float) -> float:
+        ...     return max(0.0, min(1.0, 1.0 - latency_ms / 2000.0))
+        >>> def fast_total_time(total_time_s: float) -> float:
+        ...     return max(0.0, min(1.0, 1.0 - total_time_s / 30.0))
+        >>> compound = Signature(
+        ...     "question -> answer, price_usd, latency_ms, total_time_s"
+        ... ).objective(
+        ...     "Assign a score from 0 to 1 for answer accuracy, where 1 means fully correct and 0 means clearly incorrect.",
+        ...     "Assign a score from 0 to 1 for overall usefulness, where 1 means the answer is helpful, well explained, and appropriate for the user, and 0 means it is unhelpful or poorly framed.",
+        ...     cheap,
+        ...     low_latency,
+        ...     fast_total_time,
+        ...     (4.0, 2.0, 1.0, 1.0, 1.0),
+        ... )
+        >>> [criterion.kind for criterion in compound.objective_spec.criteria]
+        ['rubric', 'rubric', 'metric', 'metric', 'metric']
+        >>> compound.objective_spec.weights
+        (4.0, 2.0, 1.0, 1.0, 1.0)
         """
         objective = _normalize_objective_items(items)
         return Signature(
@@ -688,43 +717,6 @@ class Signature:
             _examples=self._examples,
             _objective=objective,
         )
-
-    def rubric(self, text: str) -> Signature:
-        """Return a copy with a single rubric objective.
-
-        This is a small convenience wrapper around `objective` for the common
-        case where you only want one rubric.
-
-        Parameters
-        ----------
-        text : str
-            Rubric text to judge numerically.
-
-        Returns
-        -------
-        Signature
-            A new signature with a one-rubric objective.
-
-        Notes
-        -----
-        A rubric string should read like scoring guidance for a judge, not just
-        like a short label. It is usually best to say what score range to use
-        and what high and low scores mean.
-
-        Examples
-        --------
-        >>> sig = Signature("question -> answer").rubric(
-        ...     "Assign a score from 0 to 1 for answers that are correct, direct, and free of unnecessary detail, where 1 means the answer fully satisfies all three criteria."
-        ... )
-        >>> len(sig.objective_spec.criteria)
-        1
-        >>> sig.objective_spec.criteria[0].kind
-        'rubric'
-        >>> sig.objective_spec.weights
-        (1.0,)
-        """
-        return self.objective(text)
-
     def via(
         self,
         name: str,
@@ -894,7 +886,6 @@ class Signature:
         ...     Signature("question -> answer")
         ...     .hint("Answer briefly.")
         ...     .examples([{"question": "2 + 2", "answer": "4"}])
-        ...     .rubric("Assign a score from 0 to 1 for factual correctness, where 1 means fully correct and 0 means clearly incorrect.")
         ...     .dump_state()
         ... )
         >>> state['formula']
@@ -965,7 +956,6 @@ class Signature:
         ...     .hint("Answer and include confidence.")
         ...     .type(confidence=float)
         ...     .examples([{"question": "2 + 2", "answer": "4", "confidence": 0.99}])
-        ...     .rubric("Assign a score from 0 to 1 for answers that are both correct and well calibrated, where higher scores require both accurate content and appropriate confidence.")
         ... )
         >>> restored = Signature.load_state(original.dump_state())
         >>> restored.formula
