@@ -1,23 +1,10 @@
 from __future__ import annotations
 
-import re
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Annotated, Any, Iterable, Literal, Mapping, get_args, get_origin
+from typing import Annotated, Any, Literal, get_args, get_origin
 
-
-@dataclass(frozen=True)
-class Description:
-    """Human-readable description attached to a type.
-
-    Examples:
-        >>> Rating = Annotated[float, Description("star rating")]
-    """
-
-    text: str
-
-    def __describe__(self) -> str:
-        return self.text
+from .examples import ExamplesTable, infer_type as _infer_type, normalize_examples as _normalize_examples
 
 
 @dataclass(frozen=True)
@@ -27,12 +14,14 @@ class Field:
     Attributes:
         name: Field name.
         role: One of ``"input"``, ``"hidden"``, or ``"output"``.
-        type_: Python type, possibly ``Annotated`` with a ``Description``.
+        type_: Python type.
+        description: Optional human-readable field description.
     """
 
     name: str
     role: Literal["input", "hidden", "output"]
     type_: type = str
+    description: str | None = None
 
     @property
     def base_type(self) -> type:
@@ -47,24 +36,14 @@ class Field:
         return ()
 
     @property
-    def description(self) -> str | None:
-        for a in self.annotations:
-            if isinstance(a, Description):
-                return a.text
-        return None
-
-    @property
     def desc(self) -> str | None:
         return self.description
 
-    @property
-    def prefix(self) -> str:
-        s = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", self.name)
-        s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
-        return " ".join(w if w.isupper() else w.capitalize() for w in s.split("_"))
-
     def describe(self) -> str:
-        return describe_type(self.type_)
+        type_text = describe_type(self.type_)
+        if self.description:
+            return f"{self.description}: {type_text}"
+        return type_text
 
 
 _ROLE_ORDER = {"input": 0, "hidden": 1, "output": 2}
@@ -85,8 +64,8 @@ def describe_type(tp: Any) -> str:
     """Render a type as human-readable text.
 
     Examples:
-        >>> describe_type(Annotated[float, Description("star rating")])
-        'star rating: float'
+        >>> describe_type(float)
+        'float'
         >>> describe_type(Literal["pos", "neg"])
         "one of: 'pos', 'neg'"
     """
@@ -96,12 +75,8 @@ def describe_type(tp: Any) -> str:
         return "one of: " + ", ".join(repr(v) for v in get_args(tp))
 
     if origin is Annotated:
-        base, *annotations = get_args(tp)
-        descs = [text for annotation in annotations if (text := _describe_annotation(annotation)) is not None]
-        result = describe_type(base)
-        if descs:
-            result = ", ".join(descs) + ": " + result
-        return result
+        base, *_ = get_args(tp)
+        return describe_type(base)
 
     if origin is not None:
         args = get_args(tp)
@@ -113,156 +88,6 @@ def describe_type(tp: Any) -> str:
     if isinstance(tp, type):
         return tp.__name__
     return str(tp)
-
-
-def _describe_annotation(annotation: Any) -> str | None:
-    if hasattr(annotation, "__describe__"):
-        return annotation.__describe__()
-    return None
-
-
-class ExamplesTable:
-    """Duck-typed wrapper around tabular training examples.
-
-    The goal is not to define a strict dataframe protocol, but to accept
-    the common shapes users already have:
-
-    - pandas DataFrame
-    - polars DataFrame
-    - duckdb relation
-    - pyarrow Table / RecordBatch
-    - pyspark DataFrame
-    - numpy structured array / recarray
-    - list/iterable of dict records
-
-    Internally we only need four things:
-
-    - column names
-    - row count
-    - record serialization
-    - coarse type inference per column
-    """
-
-    __slots__ = ("raw",)
-
-    def __init__(self, raw: Any):
-        self.raw = raw
-
-    @property
-    def columns(self) -> list[str]:
-        raw = self.raw
-        if hasattr(raw, "columns"):
-            return [str(column) for column in raw.columns]
-        if hasattr(raw, "column_names"):
-            return [str(column) for column in raw.column_names]
-        if hasattr(raw, "dtype") and getattr(raw.dtype, "names", None):
-            return [str(column) for column in raw.dtype.names]
-        if hasattr(raw, "schema"):
-            schema = raw.schema
-            if isinstance(schema, Mapping):
-                return [str(column) for column in schema.keys()]
-            if hasattr(schema, "names"):
-                return [str(column) for column in schema.names]
-            if hasattr(schema, "fieldNames"):
-                return [str(column) for column in schema.fieldNames()]
-        if hasattr(raw, "dtypes"):
-            try:
-                return [str(column) for column, _ in raw.dtypes]
-            except Exception:  # noqa: BLE001
-                pass
-        records = self.to_records()
-        return list(records[0].keys()) if records else []
-
-    def __len__(self) -> int:
-        raw = self.raw
-        if hasattr(raw, "height"):
-            return int(raw.height)
-        if hasattr(raw, "num_rows") and raw.num_rows is not None:
-            return int(raw.num_rows)
-        if hasattr(raw, "count"):
-            try:
-                count = raw.count()
-                if isinstance(count, int):
-                    return count
-            except Exception:  # noqa: BLE001
-                pass
-        try:
-            return len(raw)
-        except TypeError:
-            return len(self.to_records())
-
-    def infer_type(self, name: str) -> type:
-        schema_type = _infer_type_from_schema(self.raw, name)
-        if schema_type is not None:
-            return schema_type
-
-        for record in self.to_records():
-            if name not in record:
-                continue
-            value = record[name]
-            if value is None:
-                continue
-            return _infer_python_value_type(value)
-        return str
-
-    def to_records(self) -> list[dict[str, Any]]:
-        raw = self.raw
-
-        if hasattr(raw, "to_dicts"):
-            records = raw.to_dicts()
-        elif hasattr(raw, "to_pylist"):
-            records = raw.to_pylist()
-        elif hasattr(raw, "to_dict"):
-            try:
-                records = raw.to_dict("records")
-            except TypeError:
-                records = None
-            if records is None:
-                raise TypeError("Unsupported tabular object: .to_dict() exists but does not support record output.")
-        elif hasattr(raw, "arrow"):
-            table = raw.arrow()
-            if hasattr(table, "to_pylist"):
-                records = table.to_pylist()
-            else:
-                raise TypeError("Unsupported tabular object: .arrow() result cannot be converted to records.")
-        elif hasattr(raw, "to_arrow"):
-            table = raw.to_arrow()
-            if hasattr(table, "to_pylist"):
-                records = table.to_pylist()
-            else:
-                raise TypeError("Unsupported tabular object: .to_arrow() result cannot be converted to records.")
-        elif hasattr(raw, "toLocalIterator"):
-            records = list(raw.toLocalIterator())
-        elif hasattr(raw, "collect") and hasattr(raw, "dtypes"):
-            records = raw.collect()
-        elif hasattr(raw, "df"):
-            df = raw.df()
-            if hasattr(df, "to_dict"):
-                records = df.to_dict("records")
-            else:
-                raise TypeError("Unsupported tabular object: .df() result cannot be converted to records.")
-        elif hasattr(raw, "dtype") and getattr(raw.dtype, "names", None):
-            records = []
-            names = list(raw.dtype.names)
-            for row in raw:
-                records.append({name: row[name].item() if hasattr(row[name], "item") else row[name] for name in names})
-        elif isinstance(raw, Iterable):
-            records = list(raw)
-        else:
-            raise TypeError(
-                "Examples must be dataframe-like (pandas/polars/duckdb/arrow/pyspark/numpy-structured) or an iterable of dict records."
-            )
-
-        normalized: list[dict[str, Any]] = []
-        for record in records:
-            if isinstance(record, Mapping):
-                normalized.append(dict(record))
-                continue
-            if hasattr(record, "asDict"):
-                normalized.append(dict(record.asDict(recursive=True)))
-                continue
-            raise TypeError("Example rows must be mapping-like records.")
-        return normalized
 
 
 class Signature:
@@ -359,43 +184,35 @@ class Signature:
 
     def describe(self, **descriptions: str) -> Signature:
         """Return a new signature with updated field descriptions."""
-        new_fields = []
-        for field in self._fields:
-            if field.name in descriptions:
-                new_fields.append(
-                    Field(field.name, field.role, _add_annotation(field.type_, Description(descriptions[field.name])))
-                )
-            else:
-                new_fields.append(field)
-        return Signature(_fields=tuple(new_fields), instructions=self._instructions, _examples=self._examples)
+        new_fields = tuple(
+            Field(field.name, field.role, field.type_, descriptions.get(field.name, field.description))
+            for field in self._fields
+        )
+        return Signature(_fields=new_fields, instructions=self._instructions, _examples=self._examples)
 
     def retype(self, **types: type) -> Signature:
         """Return a new signature with updated field types."""
         new_fields = tuple(
-            Field(field.name, field.role, types[field.name]) if field.name in types else field
+            Field(field.name, field.role, types.get(field.name, field.type_), field.description)
             for field in self._fields
         )
         return Signature(_fields=new_fields, instructions=self._instructions, _examples=self._examples)
 
     def via(self, name: str, type_: type = str, *, desc: str | None = None) -> Signature:
         """Return a new signature factored through one more hidden field."""
-        if desc is not None:
-            type_ = _add_annotation(type_, Description(desc))
         fields = list(self._fields)
         insert_at = len(fields)
         for i, field in enumerate(fields):
             if field.role == "output":
                 insert_at = i
                 break
-        fields.insert(insert_at, Field(name, "hidden", type_))
+        fields.insert(insert_at, Field(name, "hidden", type_, desc))
         return Signature(_fields=tuple(fields), instructions=self._instructions, _examples=self._examples)
 
     def add(self, name: str, type_: type = str, *, desc: str | None = None) -> Signature:
         """Return a new signature with one more output field."""
-        if desc is not None:
-            type_ = _add_annotation(type_, Description(desc))
         return Signature(
-            _fields=tuple([*self._fields, Field(name, "output", type_)]),
+            _fields=tuple([*self._fields, Field(name, "output", type_, desc)]),
             instructions=self._instructions,
             _examples=self._examples,
         )
@@ -440,9 +257,7 @@ class Signature:
         for item in state["fields"]:
             type_ = _BUILTIN_TYPES.get(item["type"], str)
             description = item.get("description") or item.get("desc")
-            if description:
-                type_ = _add_annotation(type_, Description(description))
-            fields.append(Field(item["name"], item["role"], type_))
+            fields.append(Field(item["name"], item["role"], type_, description))
         examples = _normalize_examples(state["examples"]) if state.get("examples") is not None else None
         return cls(_fields=tuple(fields), instructions=state["instructions"], _examples=examples)
 
@@ -465,26 +280,7 @@ class Signature:
         return hash((self._fields, self._instructions))
 
 
-Desc = Description
-
-
-__all__ = ["Description", "Desc", "Field", "Signature", "describe_type"]
-
-
-def _normalize_examples(data: Any | None) -> ExamplesTable | None:
-    if data is None:
-        return None
-    if isinstance(data, ExamplesTable):
-        return data
-    return ExamplesTable(data)
-
-
-def _add_annotation(tp: type, annotation: Any) -> type:
-    if get_origin(tp) is Annotated:
-        base, *existing = get_args(tp)
-        filtered = [item for item in existing if type(item) is not type(annotation)]
-        return Annotated[tuple([base, *filtered, annotation])]
-    return Annotated[tp, annotation]
+__all__ = ["Field", "Signature", "describe_type"]
 
 
 def _parse_formula(
@@ -582,115 +378,3 @@ def _resolve_simple_type(name: str, custom_types: dict[str, type] | None = None)
     raise ValueError(f"Unknown type {name!r}.")
 
 
-def _infer_type(data: ExamplesTable | None, name: str) -> type:
-    if data is None or name not in data.columns:
-        return str
-    return data.infer_type(name)
-
-
-def _infer_type_from_schema(raw: Any, name: str) -> type | None:
-    # pandas-like: df[col].dtype.kind
-    if hasattr(raw, "__getitem__") and hasattr(raw, "columns") and name in getattr(raw, "columns"):
-        try:
-            dtype = raw[name].dtype
-            kind = getattr(dtype, "kind", None)
-            if kind is not None:
-                return {"f": float, "i": int, "u": int, "b": bool}.get(kind, str)
-        except Exception:  # noqa: BLE001
-            pass
-
-    # numpy structured arrays / recarrays
-    if hasattr(raw, "dtype") and getattr(raw.dtype, "names", None) and name in raw.dtype.names:
-        try:
-            inferred = _infer_type_from_dtype_name(str(raw.dtype[name]))
-            if inferred is not None:
-                return inferred
-        except Exception:  # noqa: BLE001
-            pass
-
-    # polars-like / arrow-like / spark-like schema objects
-    if hasattr(raw, "schema"):
-        schema = raw.schema
-        if isinstance(schema, Mapping) and name in schema:
-            inferred = _infer_type_from_dtype_name(str(schema[name]))
-            if inferred is not None:
-                return inferred
-        if hasattr(schema, "field"):
-            try:
-                inferred = _infer_type_from_dtype_name(str(schema.field(name).type))
-                if inferred is not None:
-                    return inferred
-            except Exception:  # noqa: BLE001
-                pass
-        if hasattr(schema, "__iter__"):
-            try:
-                for field in schema:
-                    field_name = getattr(field, "name", None)
-                    if field_name == name:
-                        dtype = getattr(field, "dataType", None) or getattr(field, "type", None)
-                        inferred = _infer_type_from_dtype_name(str(dtype))
-                        if inferred is not None:
-                            return inferred
-            except Exception:  # noqa: BLE001
-                pass
-
-    # pyspark-like: dtypes is a list of (name, type)
-    if hasattr(raw, "dtypes"):
-        try:
-            for column, dtype in raw.dtypes:
-                if column == name:
-                    inferred = _infer_type_from_dtype_name(str(dtype))
-                    if inferred is not None:
-                        return inferred
-        except Exception:  # noqa: BLE001
-            pass
-
-    # duckdb-like: relation.columns + relation.types
-    if hasattr(raw, "columns") and hasattr(raw, "types"):
-        try:
-            columns = list(raw.columns)
-            index = columns.index(name)
-            inferred = _infer_type_from_dtype_name(str(raw.types[index]))
-            if inferred is not None:
-                return inferred
-        except Exception:  # noqa: BLE001
-            pass
-
-    return None
-
-
-def _infer_type_from_dtype_name(dtype_name: str) -> type | None:
-    text = dtype_name.upper()
-    if any(token in text for token in ("DOUBLE", "FLOAT", "DECIMAL", "NUMERIC", "FLOAT16", "FLOAT32", "FLOAT64")):
-        return float
-    if any(token in text for token in (
-        "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "UBIGINT", "UINTEGER",
-        "INT8", "INT16", "INT32", "INT64", "UINT8", "UINT16", "UINT32", "UINT64",
-        "LONG", "SHORT", "BYTE",
-    )):
-        return int
-    if any(token in text for token in ("BOOL", "BOOLEAN")):
-        return bool
-    if any(token in text for token in ("LIST", "ARRAY")):
-        return list
-    if any(token in text for token in ("STRUCT", "MAP", "DICT", "OBJECT")):
-        return dict
-    if any(token in text for token in ("STR", "TEXT", "VARCHAR", "UTF8", "STRING", "UNICODE")):
-        return str
-    return None
-
-
-def _infer_python_value_type(value: Any) -> type:
-    if isinstance(value, bool):
-        return bool
-    if isinstance(value, int):
-        return int
-    if isinstance(value, float):
-        return float
-    if isinstance(value, str):
-        return str
-    if isinstance(value, (list, tuple, set)):
-        return list
-    if isinstance(value, Mapping):
-        return dict
-    return type(value)

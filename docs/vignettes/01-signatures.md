@@ -72,21 +72,21 @@ question -> answer
 1  Capital of France?  Paris
 ```
 
-## Descriptions live in the type
+## Descriptions live on fields
 
 ```python
-from typing import Annotated, Literal
-from onux import Description, describe_type
+from typing import Literal
+from onux import Signature, describe_type
 
-Rating = Annotated[float, Description("star rating")]
 Sentiment = Literal["positive", "negative", "neutral"]
 
-review = Signature("text -> sentiment: Sentiment, rating: Rating, summary", types={
+review = Signature("text -> sentiment: Sentiment, rating: float, summary", types={
     "Sentiment": Sentiment,
-    "Rating": Rating,
-})
+}).describe(
+    rating="star rating",
+)
 print(review)
-print(describe_type(Rating))
+print(describe_type(Sentiment))
 ```
 
 ```output:exec-1773708510833-ug1h3
@@ -96,14 +96,14 @@ text -> sentiment, rating, summary
   ← sentiment  one of: 'positive', 'negative', 'neutral'
   ← rating     star rating: float
   ← summary    str
-star rating: float
+one of: 'positive', 'negative', 'neutral'
 ```
 
 ## Update descriptions and types after the fact
 
 ```python
-review = review.describe(text="Product review text", summary="One-sentence summary")
-review = review.retype(summary=Annotated[str, Description("Brief summary")])
+review = review.describe(text="Product review text", summary="Brief summary")
+review = review.retype(summary=str)
 print(review)
 ```
 

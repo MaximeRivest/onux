@@ -20,8 +20,6 @@ sys.path.insert(0, os.path.abspath("src"))
 ```python
 from onux import (
     ChainOfThought,
-    Description,
-    Desc,
     ExecuteSQL,
     Field,
     FieldSpec,
@@ -67,37 +65,22 @@ question -> answer
 ### `Field`
 
 ```python
-field = Field("rating", "output", float)
+field = Field("rating", "output", float, "star rating")
 print(field.name, field.role, field.describe())
 ```
 
 ```output:exec-1773708257153-ajvqd
-rating output float
+rating output star rating: float
 ```
-
-### `Description`
-
-```python
-from typing import Annotated
-
-Rating = Annotated[float, Description("star rating")]
-print(describe_type(Rating))
-```
-
-```output:exec-1773708259590-pkcxi
-star rating: float
-```
-
-`Desc` is kept as a short alias for `Description`.
 
 ### `describe_type`
 
 ```python
-print(describe_type(Rating))
+print(describe_type(list[str]))
 ```
 
 ```output:exec-1773708261463-jr9re
-star rating: float
+list[str]
 ```
 
 ## Core symbolic graph API

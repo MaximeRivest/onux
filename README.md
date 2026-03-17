@@ -61,18 +61,20 @@ sig = sig.via("reasoning", desc="Step-by-step tax calculation")
 print(sig)
 ```
 
-### Descriptions live in the type
+### Descriptions live on fields
 
 ```python
-from typing import Annotated, Literal
-from onux import Description, Signature
+from typing import Literal
+from onux import Signature
 
-Rating = Annotated[float, Description("star rating")]
 Sentiment = Literal["positive", "negative", "neutral"]
 
 review = Signature(
-    "text -> sentiment: Sentiment, rating: Rating, summary",
-    types={"Sentiment": Sentiment, "Rating": Rating},
+    "text -> sentiment: Sentiment, rating: float, summary",
+    types={"Sentiment": Sentiment},
+).describe(
+    rating="star rating",
+    summary="brief summary",
 )
 print(review)
 ```
@@ -322,8 +324,6 @@ Top-level imports:
 ```python
 from onux import (
     Signature,
-    Description,
-    Desc,
     describe_type,
     Input,
     Symbol,
