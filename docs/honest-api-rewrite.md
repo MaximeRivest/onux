@@ -183,49 +183,157 @@ Signature. Generally, if you don't plan to evaluate or optimize over this output
 If Signature is the **what**, Program is the **how**.
 
 A `Program` is the concrete, executable, serializable, optimizable unit
-for one Signature.
-
-It binds together:
-- a **module** — the strategy pattern
-- a **runner** — the execution engine
-- an **adapter** — the I/O bridge
-- module configuration
-- runner configuration
-- any strategy-level decomposition or tools
+for one Signature. Like Signature, it is an **immutable builder**. Each
+method returns a new Program. You build up execution strategy the same
+way you build up intent — one step at a time.
 
 ### Core shape
 
+A Program starts from a module and a runner — the two essential
+bindings. Everything else is layered on with builder methods:
+
 ```python
-program = Program(
+program = (
+    Program(chain_of_thought, OpenAILM("gpt-4o", temperature=0.0))
+    .hint("Read carefully and reason step by step.")
+    .via("reasoning", note="Internal analysis")
+)
+
+result = program(triage, {"support_request": "I was charged twice."})
+```
+
+The constructor takes two positional arguments:
+- **module** — the strategy pattern
+- **runner** — the execution engine
+
+Builder methods configure the strategy:
+- `.hint(text)` — prompt-level guidance
+- `.via(name, *, note=None, type_=str)` — add hidden decomposition
+- `.note(**field_notes)` — per-field prompt descriptions
+- `.tools(tool_list)` — external tools (for react, etc.)
+- `.expose(*names)` — surface trace fields as graph symbols
+- `.adapter(adapter)` — override the default I/O bridge
+- `.set(**config)` — generic escape hatch for module-specific params
+
+Each returns a new immutable Program.
+
+### Why this shape
+
+The flat-constructor version puts everything at the same level:
+
+```python
+# BAD: adapter, hint, via look like peers of module and runner
+Program(
     module=chain_of_thought,
     runner=OpenAILM("gpt-4o", temperature=0.0),
     adapter="auto",
     hint="Read carefully and reason step by step.",
     via=[("reasoning", {"note": "Internal analysis"})],
 )
+```
 
-result = program(triage, {"support_request": "I was charged twice."})
+But these belong to different owners:
+- `module` and `runner` are the core binding
+- `hint`, `via`, `note`, `tools` are module configuration
+- `adapter` is the I/O bridge
+- `temperature` is runner configuration (lives on the runner object)
+
+The builder pattern makes ownership clear through method names. You do
+not need to know the internal taxonomy — the method name tells you what
+you are configuring.
+
+### Composition and forking
+
+Because Programs are immutable, you can fork from a shared base:
+
+```python
+# Shared strategy, different runners
+strategy = (
+    Program(predict)
+    .hint("You are a helpful assistant")
+    .via("reasoning")
+)
+fast = strategy.runner(OpenAILM("gpt-4o-mini"))
+accurate = strategy.runner(OpenAILM("o1"))
+
+# Shared runner, different strategies
+base = Program(predict, OpenAILM("gpt-4o", temperature=0.0))
+with_reasoning = base.module(chain_of_thought).hint("Think carefully.")
+with_tools = base.module(react).tools([search, calculator])
+
+# Progressive refinement
+v1 = Program(predict, OpenAILM("gpt-4o"))
+v2 = v1.module(chain_of_thought).hint("Reason step by step.")
+v3 = v2.via("evidence", note="Supporting facts").hint("Cite evidence.")
+```
+
+This mirrors how Signature authoring works:
+
+```python
+v1 = Signature("question -> answer")
+v2 = v1.type(answer=str).examples([...])
+v3 = v2.objective("Score correctness from 0 to 1.")
+```
+
+Two immutable builders — one for intent, one for strategy — with the
+same feel.
+
+### Partial Programs
+
+A Program without a runner is a **partial Program** — a reusable
+strategy template that becomes executable when a runner is bound:
+
+```python
+careful_cot = (
+    Program(chain_of_thought)
+    .hint("Think step by step.")
+    .via("reasoning", note="Show your work")
+)
+
+# Bind to different runners for different contexts
+for_triage = careful_cot.runner(OpenAILM("gpt-4o", temperature=0.0))
+for_research = careful_cot.runner(AnthropicLM("claude-3-5-sonnet"))
+```
+
+A Program without a module defaults to `predict`.
+
+### The `.runner()` and `.module()` methods
+
+These swap the core bindings:
+
+```python
+program = Program(predict, OpenAILM("gpt-4o"))
+upgraded = program.module(chain_of_thought)   # new module, same runner
+swapped = program.runner(AnthropicLM("claude-3-5-sonnet"))  # new runner, same module
+```
+
+Runner configuration lives on the runner object itself — not on Program:
+
+```python
+# Runner config is the runner's own concern
+runner = OpenAILM("gpt-4o", temperature=0.0, max_tokens=4096)
+program = Program(chain_of_thought, runner)
 ```
 
 ### Why Program exists as a first-class object
+
 `functools.partial` is not enough.
 A Program earns its place because it is:
-- executable
-- serializable
-- introspectable
-- searchable
-- checkpointable
-- comparable
+- **immutable** — builder methods return new Programs, safe to fork
+- **executable** — `program(sig, inputs) -> Result`
+- **serializable** — `dump_state()` / `load_state()` for checkpoints
+- **introspectable** — `.axes()` for optimizer and debugging
+- **searchable** — the optimizer produces and compares Programs
+- **composable** — fork, layer, specialize from a base
 
 The optimizer produces Programs.
 Humans author Programs.
 Models are built from Programs.
 
 ### One clean story
-A user should be able to say:
 
 > I write a **Signature** for what I want.
-> I write a **Program** for how to get it.
+> I build a **Program** for how to get it.
 > I run the Program.
 
 That is the basic unit of Onux.
@@ -471,13 +579,12 @@ Signature("question -> reasoning, answer")
 
 ### 2. Strategy-level decomposition
 If the Program wants to introduce internal scaffolding, it does so with
-strategy configuration:
+builder methods:
 
 ```python
-Program(
-    module=chain_of_thought,
-    runner=OpenAILM("gpt-4o"),
-    via=[("reasoning", {"note": "Internal reasoning"})],
+(
+    Program(chain_of_thought, OpenAILM("gpt-4o"))
+    .via("reasoning", note="Internal reasoning")
 )
 ```
 
@@ -696,7 +803,7 @@ incrementally.
 
 ```python
 sig = Signature("question -> answer")
-program = Program(module=predict, runner=OpenAILM("gpt-4o"))
+program = Program(predict, OpenAILM("gpt-4o"))
 result = program(sig, {"question": "What is 2+2?"})
 ```
 
@@ -714,10 +821,10 @@ sig = (
 ### Ring 3: improve execution
 
 ```python
-program = Program(
-    module=chain_of_thought,
-    runner=OpenAILM("gpt-4o", temperature=0.0),
-    hint="Reason carefully before answering.",
+program = (
+    Program(chain_of_thought, OpenAILM("gpt-4o", temperature=0.0))
+    .hint("Reason carefully before answering.")
+    .via("reasoning")
 )
 ```
 

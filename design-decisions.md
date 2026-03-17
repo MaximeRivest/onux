@@ -168,40 +168,89 @@ My recommendation:
 - **If optimizer is not shipping early, keep `Program` secondary in v1**.
 - **If optimizer is central, make `Program` explicitly first-class now**.
 
-> ### Answer: Option A - Program is first-class public API
+> ### Answer: Option A — Program is first-class public API, as an immutable builder
 >
 > Program is the second noun users learn, right after Signature. It is
 > the concrete, executable, serializable, optimizable binding of
-> strategy to intent.
+> strategy to intent. Like Signature, it is an **immutable builder** —
+> each method returns a new Program.
 >
 > ```python
-> program = Program(
->     module=chain_of_thought,
->     runner=OpenAILM("gpt-4o", temperature=0.0),
->     hint="Read the support request carefully.",
->     via=[("reasoning", {"note": "Step-by-step analysis"})],
+> program = (
+>     Program(chain_of_thought, OpenAILM("gpt-4o", temperature=0.0))
+>     .hint("Read the support request carefully.")
+>     .via("reasoning", note="Step-by-step analysis")
 > )
 > result = program(signature, inputs)
 > ```
 >
-> **What Program holds:**
+> **The constructor takes two positional args:**
 >
-> - `module` - the strategy pattern (chain_of_thought, predict, react, …)
-> - `runner` - the execution engine (an LM, an sklearn model, a vision
+> - `module` — the strategy pattern (chain_of_thought, predict, react, …)
+> - `runner` — the execution engine (an LM, an sklearn model, a vision
 >   model, a code runner, …)
-> - `adapter` - the I/O bridge (defaults to auto-generated if omitted)
-> - Strategy configuration that the module needs: `hint`, `via` fields,
->   `notes`, `tools`, `max_iter`, `check`, etc.
-> - Any runner-specific overrides beyond what the runner was constructed
->   with
+>
+> **Builder methods configure the strategy:**
+>
+> - `.hint(text)` — prompt-level guidance
+> - `.via(name, *, note=None, type_=str)` — add hidden decomposition
+> - `.note(**field_notes)` — per-field prompt descriptions
+> - `.tools(tool_list)` — external tools (for react, etc.)
+> - `.expose(*names)` — surface trace fields as graph symbols
+> - `.adapter(adapter)` — override the default I/O bridge
+> - `.module(module)` — swap the strategy pattern
+> - `.runner(runner)` — swap the execution engine
+> - `.set(**config)` — generic escape hatch for module-specific params
+>
+> Each returns a new immutable Program.
+>
+> **Why a builder, not a flat constructor:**
+>
+> The flat constructor puts module config, runner config, and adapter
+> config at the same nesting level — making them look like peers when
+> they belong to different owners. The builder pattern makes ownership
+> clear through method names: `.hint()` is obviously strategy config,
+> `.runner()` obviously swaps the engine, `.adapter()` obviously sets
+> the I/O bridge. Runner config (temperature, max_tokens) stays on the
+> runner object where it belongs.
+>
+> **Composition and forking:**
+>
+> Because Programs are immutable, you can fork from a shared base:
+>
+> ```python
+> # Shared strategy, different runners
+> strategy = Program(chain_of_thought).hint("Think step by step.").via("reasoning")
+> fast = strategy.runner(OpenAILM("gpt-4o-mini"))
+> accurate = strategy.runner(OpenAILM("o1"))
+>
+> # Progressive refinement
+> v1 = Program(predict, OpenAILM("gpt-4o"))
+> v2 = v1.module(chain_of_thought).hint("Reason step by step.")
+> v3 = v2.via("evidence", note="Supporting facts")
+> ```
+>
+> This mirrors Signature authoring exactly: two immutable builders, one
+> for intent, one for strategy, with the same feel.
+>
+> **Partial Programs:**
+>
+> A Program without a runner is a reusable strategy template:
+>
+> ```python
+> careful_cot = Program(chain_of_thought).hint("Think carefully.").via("reasoning")
+> for_triage = careful_cot.runner(OpenAILM("gpt-4o", temperature=0.0))
+> for_research = careful_cot.runner(AnthropicLM("claude-3-5-sonnet"))
+> ```
+>
+> A Program without a module defaults to `predict`.
 >
 > **What Program is:**
 >
-> - A dataclass (or similar thin structure), not a class hierarchy
+> - Immutable — builder methods return new Programs, safe to fork
 > - Callable: `program(sig, inputs) -> Result`
-> - Serializable: can be checkpointed, logged, reproduced
-> - Introspectable: `.axes()` returns the combined axis map of its
->   module, runner, and adapter
+> - Serializable: `dump_state()` / `load_state()` for checkpoints
+> - Introspectable: `.axes()` returns the combined axis map
 > - The unit of search for the optimizer
 > - The unit of execution for a single task
 >
@@ -209,25 +258,9 @@ My recommendation:
 >
 > - Not a replacement for Signature. Signature says *what*. Program says
 >   *how*.
-> - Not a deep class hierarchy. There is one `Program` class. Different
->   modules, runners, and adapters are composed in, not subclassed.
+> - Not a deep class hierarchy. One `Program` class. Different modules,
+>   runners, and adapters are composed in, not subclassed.
 > - Not opaque. Every parameter is inspectable and serializable.
->
-> **Why first-class:**
->
-> The optimizer produces Programs, evaluates Programs, checkpoints
-> Programs, and compares Programs. If Program is secondary or hidden, the
-> optimizer has no natural public object to work with. Making Program
-> first-class also gives users a clear mental model: "I write a
-> Signature (what I want), then I write a Program (how to get it), then
-> I run the Program." The two-object story is clean.
->
-> **Relationship to `partial`:**
->
-> `functools.partial` can still be used for quick scripting:
-> `partial(chain_of_thought, lm=my_lm, hint="...")`. But `partial` is
-> not serializable, not introspectable, and not optimizer-compatible.
-> Program is the "real" object. `partial` is the shortcut.
 >
 > **A fully-pinned Program is a Checkpoint:**
 >
