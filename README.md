@@ -56,7 +56,7 @@ For more hidden scaffolding, factor through extra fields with `.via()`:
 
 ```python
 sig = Signature("receipt_image -> before_tax, after_tax")
-sig = sig.retype(before_tax=float, after_tax=float)
+sig = sig.type(before_tax=float, after_tax=float)
 sig = sig.via("extracted_numbers", note="All monetary values on the receipt")
 sig = sig.via("reasoning", note="Step-by-step tax calculation")
 print(sig)
@@ -72,7 +72,7 @@ Sentiment = Literal["positive", "negative", "neutral"]
 
 review = (
     Signature("text -> sentiment, rating, summary")
-    .retype(sentiment=Sentiment, rating=float)
+    .type(sentiment=Sentiment, rating=float)
     .note(
         rating="star rating",
         summary="brief summary",

@@ -394,7 +394,7 @@ class Signature:
         )
         return Signature(_fields=new_fields, hint=self._hint, _examples=self._examples)
 
-    def retype(self, **types: type) -> Signature:
+    def type(self, **types: type) -> Signature:
         """Return a copy with updated field types.
 
         Parameters
@@ -409,7 +409,7 @@ class Signature:
 
         Examples
         --------
-        >>> sig = Signature("question -> answer").retype(answer=float)
+        >>> sig = Signature("question -> answer").type(answer=float)
         >>> sig.output_fields["answer"].base_type is float
         True
         >>> Signature("question -> answer").output_fields["answer"].base_type is str

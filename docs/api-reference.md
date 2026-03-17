@@ -378,10 +378,10 @@ question -> answer
   ← answer    str
 ```
 
-### `.retype()`
+### `.type()`
 
 ```python
-print(Signature("question -> answer").retype(answer=float))
+print(Signature("question -> answer").type(answer=float))
 ```
 
 ```output:exec-1773708413128-q7jyf

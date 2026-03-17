@@ -82,7 +82,7 @@ Sentiment = Literal["positive", "negative", "neutral"]
 
 review = (
     Signature("text -> sentiment, rating, summary")
-    .retype(sentiment=Sentiment, rating=float)
+    .type(sentiment=Sentiment, rating=float)
     .note(
         rating="star rating",
     )
@@ -103,7 +103,7 @@ text -> sentiment, rating, summary
 
 ```python
 review = review.note(text="Product review text", summary="Brief summary")
-review = review.retype(summary=str)
+review = review.type(summary=str)
 print(review)
 ```
 
