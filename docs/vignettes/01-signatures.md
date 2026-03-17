@@ -80,10 +80,12 @@ from onux import Signature
 
 Sentiment = Literal["positive", "negative", "neutral"]
 
-review = Signature("text -> sentiment: Sentiment, rating: float, summary", types={
-    "Sentiment": Sentiment,
-}).note(
-    rating="star rating",
+review = (
+    Signature("text -> sentiment, rating, summary")
+    .retype(sentiment=Sentiment, rating=float)
+    .note(
+        rating="star rating",
+    )
 )
 print(review)
 ```

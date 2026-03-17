@@ -12,11 +12,29 @@ from .examples import ExamplesTable, infer_type as _infer_type, normalize_exampl
 class Field:
     """One field in a signature.
 
-    Attributes:
-        name: Field name.
-        role: One of ``"input"``, ``"hidden"``, or ``"output"``.
-        type_: Python type.
-        note: Optional human-readable field note.
+    Attributes
+    ----------
+    name : str
+        Field name.
+    role : {"input", "hidden", "output"}
+        Field role within the signature.
+    type_ : type, default=str
+        Python type associated with the field. This may be wrapped in
+        ``typing.Annotated``.
+    note : str | None, default=None
+        Optional human-readable field note.
+
+    Examples
+    --------
+    >>> field = Field("score", "output", float, "Normalized score")
+    >>> field.name
+    'score'
+    >>> field.role
+    'output'
+    >>> field.base_type is float
+    True
+    >>> field.note
+    'Normalized score'
     """
 
     name: str
@@ -26,12 +44,39 @@ class Field:
 
     @property
     def base_type(self) -> type:
+        """Return the underlying field type.
+
+        Returns
+        -------
+        type
+            The field type with any ``typing.Annotated`` wrapper removed.
+
+        Examples
+        --------
+        >>> field = Field("rating", "output", Annotated[int, "0-5 stars"])
+        >>> field.base_type is int
+        True
+        """
         if get_origin(self.type_) is Annotated:
             return get_args(self.type_)[0]
         return self.type_
 
     @property
     def annotations(self) -> tuple[Any, ...]:
+        """Return metadata attached through ``typing.Annotated``.
+
+        Returns
+        -------
+        tuple[Any, ...]
+            Annotation metadata for the field type. Returns an empty tuple when
+            the type is not annotated.
+
+        Examples
+        --------
+        >>> field = Field("rating", "output", Annotated[int, "0-5", "stars"])
+        >>> field.annotations
+        ('0-5', 'stars')
+        """
         if get_origin(self.type_) is Annotated:
             return get_args(self.type_)[1:]
         return ()
@@ -54,18 +99,40 @@ _ENUM_RE = re.compile(r"^\{([^}]+)\}$")
 class Signature:
     """Declarative input/output contract for one semantic task.
 
-    The formula is a short pipeline:
+    A signature is defined by a compact pipeline formula:
 
     - ``inputs -> outputs``
     - ``inputs -> hidden -> outputs``
 
-    There are at most two arrows. Use ``.via()`` to add hidden fields.
+    At most two arrows are allowed. Use :meth:`via` to insert additional hidden
+    fields after construction.
 
-    Examples:
-        >>> Signature("question -> answer").formula
-        'question -> answer'
-        >>> Signature("question -> reasoning -> answer").formula
-        'question -> reasoning -> answer'
+    Examples
+    --------
+    Start with a minimal task contract:
+
+    >>> basic = Signature("question -> answer")
+    >>> basic.formula
+    'question -> answer'
+
+    Add an explicit hidden reasoning field:
+
+    >>> hidden = Signature("question -> reasoning -> answer")
+    >>> list(hidden.hidden_fields)
+    ['reasoning']
+
+    Add type information directly in the formula:
+
+    >>> typed = Signature("question:str -> label:{yes, no}")
+    >>> get_args(typed.output_fields["label"].type_)
+    ('yes', 'no')
+
+    Infer types from example data and expand inputs with ``.`` shorthand:
+
+    >>> rows = [{"question": "2 + 2?", "context": ["math"], "answer": "4"}]
+    >>> inferred = Signature(". -> answer", data=rows)
+    >>> list(inferred.input_fields)
+    ['question', 'context']
     """
 
     __slots__ = ("_fields", "_hint", "_examples")
@@ -80,6 +147,59 @@ class Signature:
         _fields: tuple[Field, ...] | None = None,
         _examples: ExamplesTable | None = None,
     ):
+        """Create a signature from a formula or prebuilt fields.
+
+        Parameters
+        ----------
+        formula : str | None, optional
+            Formula describing the task, such as ``"question -> answer"``.
+        data : Any | None, optional
+            Tabular example data or an iterable of record mappings used to
+            infer field types and attach examples.
+        hint : str | None, optional
+            Human-readable task guidance. When omitted, a default hint is
+            derived from input and output field names.
+        types : dict[str, type] | None, optional
+            Custom type aliases keyed by the type names used inside the
+            formula.
+        _fields : tuple[Field, ...] | None, optional
+            Internal field tuple used when cloning an existing signature.
+        _examples : ExamplesTable | None, optional
+            Internal normalized examples table used when cloning an existing
+            signature.
+
+        Raises
+        ------
+        ValueError
+            If neither ``formula`` nor ``_fields`` is provided.
+
+        Examples
+        --------
+        Construct the simplest possible signature:
+
+        >>> sig = Signature("question -> answer")
+        >>> sig.dump_state()["hint"]
+        'Given `question`, produce `answer`.'
+
+        Override the default task guidance:
+
+        >>> guided = Signature("question -> answer", hint="Answer in one sentence.")
+        >>> guided.dump_state()["hint"]
+        'Answer in one sentence.'
+
+        Register a custom type alias and use it in the formula:
+
+        >>> typed = Signature("question -> answer:Score", types={"Score": float})
+        >>> typed.output_fields["answer"].base_type is float
+        True
+
+        Mix formula types and example-driven inference:
+
+        >>> rows = [{"question": "How many legs does a spider have?", "confidence": 0.9}]
+        >>> inferred = Signature("question -> confidence", data=rows)
+        >>> inferred.output_fields["confidence"].base_type is float
+        True
+        """
         if _fields is not None:
             object.__setattr__(self, "_fields", _fields)
             object.__setattr__(self, "_hint", hint or "")
@@ -102,10 +222,25 @@ class Signature:
         object.__setattr__(self, "_hint", hint)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        raise AttributeError("Signature is immutable. Use .hint(), .note(), .via(), .retype(), etc.")
+        raise AttributeError("Signature is immutable. Use .hint(), .note(), .via(), .type(), etc.")
 
     @property
     def formula(self) -> str:
+        """Return the signature formula.
+
+        Returns
+        -------
+        str
+            Comma-separated fields grouped as inputs, hidden fields, and
+            outputs, joined by ``->``.
+
+        Examples
+        --------
+        >>> Signature("question -> reasoning -> answer").formula
+        'question -> reasoning -> answer'
+        >>> Signature("question -> answer").add("confidence", float).formula
+        'question -> answer, confidence'
+        """
         groups: list[list[str]] = [[], [], []]
         for field in self._fields:
             groups[_ROLE_ORDER[field.role]].append(field.name)
@@ -113,34 +248,146 @@ class Signature:
 
     @property
     def examples(self) -> Any | None:
+        """Return the raw examples attached to the signature.
+
+        Returns
+        -------
+        Any | None
+            The original example object passed to the signature, or ``None``.
+
+        Examples
+        --------
+        >>> rows = [{"question": "Q", "answer": "A"}]
+        >>> Signature("question -> answer", data=rows).examples == rows
+        True
+        >>> Signature("question -> answer").examples is None
+        True
+        """
         return None if self._examples is None else self._examples.raw
 
     @property
     def n_examples(self) -> int:
+        """Return the number of attached examples.
+
+        Returns
+        -------
+        int
+            Number of example rows attached to the signature.
+
+        Examples
+        --------
+        >>> rows = [{"question": "Q1", "answer": "A1"}, {"question": "Q2", "answer": "A2"}]
+        >>> Signature("question -> answer", data=rows).n_examples
+        2
+        """
         return 0 if self._examples is None else len(self._examples)
 
     @property
     def fields(self) -> OrderedDict[str, Field]:
+        """Return all fields keyed by name.
+
+        Returns
+        -------
+        OrderedDict[str, Field]
+            Ordered mapping of field names to :class:`Field` objects.
+
+        Examples
+        --------
+        >>> list(Signature("question -> reasoning -> answer").fields)
+        ['question', 'reasoning', 'answer']
+        """
         return OrderedDict((field.name, field) for field in self._fields)
 
     @property
     def input_fields(self) -> OrderedDict[str, Field]:
+        """Return input fields keyed by name.
+
+        Returns
+        -------
+        OrderedDict[str, Field]
+            Ordered mapping containing only input fields.
+
+        Examples
+        --------
+        >>> list(Signature("question, context -> answer").input_fields)
+        ['question', 'context']
+        """
         return OrderedDict((field.name, field) for field in self._fields if field.role == "input")
 
     @property
     def hidden_fields(self) -> OrderedDict[str, Field]:
+        """Return hidden fields keyed by name.
+
+        Returns
+        -------
+        OrderedDict[str, Field]
+            Ordered mapping containing only hidden fields.
+
+        Examples
+        --------
+        >>> list(Signature("question -> reasoning, critique -> answer").hidden_fields)
+        ['reasoning', 'critique']
+        """
         return OrderedDict((field.name, field) for field in self._fields if field.role == "hidden")
 
     @property
     def output_fields(self) -> OrderedDict[str, Field]:
+        """Return output fields keyed by name.
+
+        Returns
+        -------
+        OrderedDict[str, Field]
+            Ordered mapping containing only output fields.
+
+        Examples
+        --------
+        >>> list(Signature("question -> answer, confidence").output_fields)
+        ['answer', 'confidence']
+        """
         return OrderedDict((field.name, field) for field in self._fields if field.role == "output")
 
     def hint(self, text: str) -> Signature:
-        """Return a new signature with different task guidance."""
+        """Return a copy with updated task guidance.
+
+        Parameters
+        ----------
+        text : str
+            New hint text.
+
+        Returns
+        -------
+        Signature
+            A new signature with the same fields and examples.
+
+        Examples
+        --------
+        >>> sig = Signature("question -> answer").hint("Be concise.")
+        >>> sig.dump_state()["hint"]
+        'Be concise.'
+        """
         return Signature(_fields=self._fields, hint=text, _examples=self._examples)
 
     def note(self, **notes: str) -> Signature:
-        """Return a new signature with updated field notes."""
+        """Return a copy with updated field notes.
+
+        Parameters
+        ----------
+        **notes : str
+            Keyword arguments mapping field names to note text.
+
+        Returns
+        -------
+        Signature
+            A new signature with updated notes.
+
+        Examples
+        --------
+        >>> sig = Signature("question -> answer").note(question="A factual question", answer="A short answer")
+        >>> sig.fields["question"].note
+        'A factual question'
+        >>> sig.fields["answer"].note
+        'A short answer'
+        """
         new_fields = tuple(
             Field(field.name, field.role, field.type_, notes.get(field.name, field.note))
             for field in self._fields
@@ -148,7 +395,26 @@ class Signature:
         return Signature(_fields=new_fields, hint=self._hint, _examples=self._examples)
 
     def retype(self, **types: type) -> Signature:
-        """Return a new signature with updated field types."""
+        """Return a copy with updated field types.
+
+        Parameters
+        ----------
+        **types : type
+            Keyword arguments mapping field names to replacement types.
+
+        Returns
+        -------
+        Signature
+            A new signature with updated field types.
+
+        Examples
+        --------
+        >>> sig = Signature("question -> answer").retype(answer=float)
+        >>> sig.output_fields["answer"].base_type is float
+        True
+        >>> Signature("question -> answer").output_fields["answer"].base_type is str
+        True
+        """
         new_fields = tuple(
             Field(field.name, field.role, types.get(field.name, field.type_), field.note)
             for field in self._fields
@@ -162,7 +428,38 @@ class Signature:
         *,
         note: str | None = None,
     ) -> Signature:
-        """Return a new signature factored through one more hidden field."""
+        """Return a copy with an additional hidden field.
+
+        Parameters
+        ----------
+        name : str
+            Name of the hidden field to insert.
+        type_ : type, default=str
+            Python type for the hidden field.
+        note : str | None, optional
+            Optional note describing the hidden field.
+
+        Returns
+        -------
+        Signature
+            A new signature with the hidden field inserted before outputs.
+
+        Examples
+        --------
+        Insert a single hidden step:
+
+        >>> sig = Signature("question -> answer").via("reasoning", note="Think step by step")
+        >>> sig.formula
+        'question -> reasoning -> answer'
+        >>> sig.hidden_fields["reasoning"].note
+        'Think step by step'
+
+        Chain additional hidden steps progressively:
+
+        >>> layered = Signature("question -> answer").via("draft").via("critique")
+        >>> layered.formula
+        'question -> draft, critique -> answer'
+        """
         fields = list(self._fields)
         insert_at = len(fields)
         for i, field in enumerate(fields):
@@ -179,7 +476,32 @@ class Signature:
         *,
         note: str | None = None,
     ) -> Signature:
-        """Return a new signature with one more output field."""
+        """Return a copy with an additional output field.
+
+        Parameters
+        ----------
+        name : str
+            Name of the output field to append.
+        type_ : type, default=str
+            Python type for the output field.
+        note : str | None, optional
+            Optional note describing the output field.
+
+        Returns
+        -------
+        Signature
+            A new signature with the extra output field.
+
+        Examples
+        --------
+        >>> sig = Signature("question -> answer").add("confidence", float, note="0 to 1")
+        >>> sig.formula
+        'question -> answer, confidence'
+        >>> sig.output_fields["confidence"].base_type is float
+        True
+        >>> sig.output_fields["confidence"].note
+        '0 to 1'
+        """
         return Signature(
             _fields=tuple([*self._fields, Field(name, "output", type_, note)]),
             hint=self._hint,
@@ -187,7 +509,26 @@ class Signature:
         )
 
     def remove(self, name: str) -> Signature:
-        """Return a new signature without the named field."""
+        """Return a copy without one field.
+
+        Parameters
+        ----------
+        name : str
+            Name of the field to remove.
+
+        Returns
+        -------
+        Signature
+            A new signature without the named field.
+
+        Examples
+        --------
+        >>> sig = Signature("question -> reasoning -> answer").remove("reasoning")
+        >>> sig.formula
+        'question -> answer'
+        >>> list(sig.hidden_fields)
+        []
+        """
         return Signature(
             _fields=tuple(field for field in self._fields if field.name != name),
             hint=self._hint,
@@ -195,15 +536,57 @@ class Signature:
         )
 
     def with_examples(self, data: Any) -> Signature:
-        """Return a new signature with different examples.
+        """Return a copy with different examples.
 
-        Accepts dataframe-like tabular data (pandas, polars, duckdb-style)
-        or an iterable of dict records.
+        Parameters
+        ----------
+        data : Any
+            Dataframe-like tabular data (for example pandas, polars, or
+            duckdb-style objects) or an iterable of record dictionaries.
+
+        Returns
+        -------
+        Signature
+            A new signature with normalized examples attached.
+
+        Examples
+        --------
+        Attach a small training set:
+
+        >>> rows = [{"question": "Q", "answer": "A"}]
+        >>> sig = Signature("question -> answer").with_examples(rows)
+        >>> sig.n_examples
+        1
+        >>> sig.examples == rows
+        True
+
+        Replace examples while keeping the same field structure:
+
+        >>> updated = sig.with_examples([{"question": "Q2", "answer": "A2"}, {"question": "Q3", "answer": "A3"}])
+        >>> updated.formula
+        'question -> answer'
+        >>> updated.n_examples
+        2
         """
         return Signature(_fields=self._fields, hint=self._hint, _examples=_normalize_examples(data))
 
     def dump_state(self) -> dict[str, Any]:
-        """Serialize prompt-facing state."""
+        """Serialize prompt-facing state.
+
+        Returns
+        -------
+        dict[str, Any]
+            JSON-serializable state that can be restored with
+            :meth:`load_state`.
+
+        Examples
+        --------
+        >>> state = Signature("question -> answer").note(answer="Short answer").dump_state()
+        >>> state["formula"]
+        'question -> answer'
+        >>> state["fields"][1]["note"]
+        'Short answer'
+        """
         return {
             "formula": self.formula,
             "hint": self._hint,
@@ -221,7 +604,33 @@ class Signature:
 
     @classmethod
     def load_state(cls, state: dict[str, Any]) -> Signature:
-        """Restore a signature from ``dump_state``."""
+        """Restore a signature from serialized state.
+
+        Parameters
+        ----------
+        state : dict[str, Any]
+            State produced by :meth:`dump_state`.
+
+        Returns
+        -------
+        Signature
+            Restored signature instance.
+
+        Examples
+        --------
+        Round-trip a basic signature:
+
+        >>> original = Signature("question -> answer").note(answer="Short answer")
+        >>> restored = Signature.load_state(original.dump_state())
+        >>> restored == original
+        True
+
+        Preserve attached examples across serialization:
+
+        >>> sig = Signature("question -> answer", data=[{"question": "Q", "answer": "A"}])
+        >>> Signature.load_state(sig.dump_state()).n_examples
+        1
+        """
         fields = [
             Field(item["name"], item["role"], _BUILTIN_TYPES.get(item["type"], str), item.get("note"))
             for item in state["fields"]

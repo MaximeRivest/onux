@@ -6,8 +6,8 @@ from typing import Any, Iterable, Mapping
 class ExamplesTable:
     """Duck-typed wrapper around tabular training examples.
 
-    The goal is not to define a strict dataframe protocol, but to accept
-    the common shapes users already have:
+    The goal is not to define a strict dataframe protocol, but to accept the
+    common shapes users already have:
 
     - pandas DataFrame
     - polars DataFrame
@@ -17,21 +17,61 @@ class ExamplesTable:
     - numpy structured array / recarray
     - list/iterable of dict records
 
-    Internally we only need four things:
+    Internally this wrapper only needs four things:
 
     - column names
     - row count
     - record serialization
     - coarse type inference per column
+
+    Examples
+    --------
+    Wrap a simple list of records:
+
+    >>> table = ExamplesTable([{"question": "Q", "score": 1.0}])
+    >>> table.columns
+    ['question', 'score']
+    >>> len(table)
+    1
+
+    Convert the table back into normalized records:
+
+    >>> table.to_records()
+    [{'question': 'Q', 'score': 1.0}]
     """
 
     __slots__ = ("raw",)
 
     def __init__(self, raw: Any):
+        """Store a tabular object or iterable of record mappings.
+
+        Parameters
+        ----------
+        raw : Any
+            Dataframe-like object or iterable of records.
+
+        Examples
+        --------
+        >>> table = ExamplesTable([{"a": 1}, {"a": 2}])
+        >>> table.raw
+        [{'a': 1}, {'a': 2}]
+        """
         self.raw = raw
 
     @property
     def columns(self) -> list[str]:
+        """Return the detected column names.
+
+        Returns
+        -------
+        list[str]
+            Column names inferred from schema information or record keys.
+
+        Examples
+        --------
+        >>> ExamplesTable([{"question": "Q", "answer": "A"}]).columns
+        ['question', 'answer']
+        """
         raw = self.raw
         if hasattr(raw, "columns"):
             return [str(column) for column in raw.columns]
@@ -56,6 +96,18 @@ class ExamplesTable:
         return list(records[0].keys()) if records else []
 
     def __len__(self) -> int:
+        """Return the number of rows.
+
+        Returns
+        -------
+        int
+            Number of example rows.
+
+        Examples
+        --------
+        >>> len(ExamplesTable([{"a": 1}, {"a": 2}, {"a": 3}]))
+        3
+        """
         raw = self.raw
         if hasattr(raw, "height"):
             return int(raw.height)
@@ -74,6 +126,31 @@ class ExamplesTable:
             return len(self.to_records())
 
     def infer_type(self, name: str) -> type:
+        """Infer a coarse Python type for one column.
+
+        Parameters
+        ----------
+        name : str
+            Column name to inspect.
+
+        Returns
+        -------
+        type
+            Inferred Python type, defaulting to ``str`` when no better guess is
+            available.
+
+        Examples
+        --------
+        >>> table = ExamplesTable([{"score": 1.0, "ok": True, "meta": {"x": 1}}])
+        >>> table.infer_type("score") is float
+        True
+        >>> table.infer_type("ok") is bool
+        True
+        >>> table.infer_type("meta") is dict
+        True
+        >>> table.infer_type("missing") is str
+        True
+        """
         schema_type = _infer_type_from_schema(self.raw, name)
         if schema_type is not None:
             return schema_type
@@ -88,6 +165,18 @@ class ExamplesTable:
         return str
 
     def to_records(self) -> list[dict[str, Any]]:
+        """Normalize the underlying data into record dictionaries.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            Example rows represented as plain Python dictionaries.
+
+        Examples
+        --------
+        >>> ExamplesTable([{"question": "Q1"}, {"question": "Q2"}]).to_records()
+        [{'question': 'Q1'}, {'question': 'Q2'}]
+        """
         raw = self.raw
 
         if hasattr(raw, "to_dicts"):
@@ -148,6 +237,28 @@ class ExamplesTable:
 
 
 def normalize_examples(data: Any | None) -> ExamplesTable | None:
+    """Normalize training examples into an :class:`ExamplesTable`.
+
+    Parameters
+    ----------
+    data : Any | None
+        Input examples, an existing :class:`ExamplesTable`, or ``None``.
+
+    Returns
+    -------
+    ExamplesTable | None
+        Wrapped examples, or ``None`` when no examples were provided.
+
+    Examples
+    --------
+    >>> normalize_examples(None) is None
+    True
+    >>> isinstance(normalize_examples([{"a": 1}]), ExamplesTable)
+    True
+    >>> table = ExamplesTable([{"a": 1}])
+    >>> normalize_examples(table) is table
+    True
+    """
     if data is None:
         return None
     if isinstance(data, ExamplesTable):
@@ -155,10 +266,36 @@ def normalize_examples(data: Any | None) -> ExamplesTable | None:
     return ExamplesTable(data)
 
 
+
 def infer_type(data: ExamplesTable | None, name: str) -> type:
+    """Infer a column type from normalized examples.
+
+    Parameters
+    ----------
+    data : ExamplesTable | None
+        Normalized example table.
+    name : str
+        Column name to inspect.
+
+    Returns
+    -------
+    type
+        Inferred Python type, or ``str`` when the column is unavailable.
+
+    Examples
+    --------
+    >>> data = normalize_examples([{"score": 1.0, "label": "good"}])
+    >>> infer_type(data, "score") is float
+    True
+    >>> infer_type(data, "label") is str
+    True
+    >>> infer_type(data, "missing") is str
+    True
+    """
     if data is None or name not in data.columns:
         return str
     return data.infer_type(name)
+
 
 
 def _infer_type_from_schema(raw: Any, name: str) -> type | None:
