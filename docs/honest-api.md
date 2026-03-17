@@ -47,68 +47,119 @@ This gives us a clean separation:
 ## Level 1: Intent (Signature)
 
 A Signature is the behavioral target. It contains only things the optimizer
-holds fixed:
+holds fixed. No `.via()`. No `.hint()`. No `.note()`. No hidden fields. No
+prompt engineering. Just: what goes in, what comes out, what good looks
+like.
+
+### Example: support ticket triage
 
 ```python
-sig = (
-    Signature("question -> answer")
-    .type(answer=str)
+from typing import Literal
+from onux import Signature
+
+Severity = Literal["low", "medium", "high", "critical"]
+Team = Literal["billing", "bug", "feature", "account"]
+
+
+def valid_structured_output(severity: str, team: str, customer_visible: bool) -> float:
+    """1.0 if all outputs are well-formed, 0.0 otherwise."""
+    return float(
+        severity in ("low", "medium", "high", "critical")
+        and team in ("billing", "bug", "feature", "account")
+        and isinstance(customer_visible, bool)
+    )
+
+
+triage = (
+    Signature("support_request -> severity, team, customer_visible")
+    .type(severity=Severity, team=Team, customer_visible=bool)
     .examples([
-        {"question": "2 + 2", "answer": "4"},
-        {"question": "Capital of France", "answer": "Paris"},
+        {
+            "support_request": "I was charged twice for my subscription this month.",
+            "severity": "high",
+            "team": "billing",
+            "customer_visible": True,
+        },
+        {
+            "support_request": "The export button is misaligned in dark mode.",
+            "severity": "low",
+            "team": "bug",
+            "customer_visible": True,
+        },
+        {
+            "support_request": "Can you add CSV export to the reporting dashboard?",
+            "severity": "low",
+            "team": "feature",
+            "customer_visible": False,
+        },
     ])
     .objective(
-        "Assign a score from 0 to 1 for factual correctness.",
-        single_sentence,
-        (2.0, 1.0),
+        "Assign a score from 0 to 1 for routing accuracy, where 1 means the "
+        "request is assigned to the correct team and severity and 0 means the "
+        "routing is clearly wrong.",
+        valid_structured_output,
+        (3.0, 1.0),
     )
 )
 ```
 
-No `.via()`. No `.hint()`. No `.note()`. No hidden fields. No prompt
-engineering. Just: what goes in, what comes out, what good looks like.
+This signature says everything about what the task IS and what good looks
+like. It says nothing about how to execute it — no LM, no prompt, no
+reasoning steps.
 
 ### How little can you specify?
 
 The Signature API should let the user specify only what they know, and
-infer the rest. The progression from minimal to fully explicit:
+infer the rest.
 
-**Scored examples only.** The most minimal useful intent. Input columns,
-output columns, and types can all be inferred from the data. A sota model
-can generate rubrics from the examples and scores.
+**Scored examples only.** The most minimal useful intent. Fields, types,
+and objective can all be inferred from the data and scores.
 
 ```python
-sig = Signature(
+triage = Signature(
     examples=[
-        {"question": "2 + 2", "answer": "4", "_score": 1.0},
-        {"question": "Capital of France", "answer": "Paris", "_score": 1.0},
-        {"question": "Largest planet", "answer": "Earth", "_score": 0.0},
+        {
+            "support_request": "I was charged twice for my subscription.",
+            "severity": "high",
+            "team": "billing",
+            "customer_visible": True,
+            "_score": 1.0,
+        },
+        {
+            "support_request": "The export button is misaligned in dark mode.",
+            "severity": "critical",
+            "team": "feature",
+            "customer_visible": False,
+            "_score": 0.0,
+        },
     ]
 )
 ```
 
-**Formula + examples.** The user knows the field names but lets types be
-inferred.
+**Formula + examples.** The user names the fields, types are inferred.
 
 ```python
-sig = Signature(
-    "question -> answer",
+triage = Signature(
+    "support_request -> severity, team, customer_visible",
     examples=[
-        {"question": "2 + 2", "answer": "4"},
-        {"question": "Capital of France", "answer": "Paris"},
+        {
+            "support_request": "I was charged twice for my subscription.",
+            "severity": "high",
+            "team": "billing",
+            "customer_visible": True,
+        },
     ],
 )
 ```
 
-**Formula + types + objective.** Fully explicit intent. Nothing left to
-infer.
+**Fully explicit.** The user specifies everything. Nothing left to infer.
 
 ```python
-sig = (
-    Signature("question -> answer")
-    .type(answer=str)
+triage = (
+    Signature("support_request -> severity, team, customer_visible")
+    .type(severity=Severity, team=Team, customer_visible=bool)
     .examples([...])
-    .objective("rubric...", metric_fn, (2.0, 1.0))
+    .objective("rubric...", valid_structured_output, (3.0, 1.0))
 )
 ```
 
@@ -116,28 +167,29 @@ At every level, the user specifies what they can, and the system fills in
 the rest. The result is always a complete behavioral target that can be
 evaluated against.
 
-Hint text, field notes, and hidden fields are NOT part of intent. They are
-prompt engineering and decomposition choices — execution strategy that the
-optimizer searches over. A module or adapter provides these when it
-fulfills the signature.
-
 ### Reference artifacts
 
 Sometimes the real goal is to imitate or replace an existing system. A
-reference artifact is part of intent: it anchors the target behavior to
-something concrete.
+reference artifact anchors the behavioral target to something concrete:
 
 ```python
-sig = (
-    Signature("support_request -> severity, team")
-    .artifact(legacy_triage_service)
+triage = (
+    Signature("support_request -> severity, team, customer_visible")
+    .type(severity=Severity, team=Team, customer_visible=bool)
+    .artifact(Artifact.service(
+        "legacy-triage-api",
+        endpoint="https://internal.example.com/triage/v2",
+    ))
+    .examples([...])
+    .objective("rubric...", valid_structured_output, (3.0, 1.0))
 )
 ```
 
-An artifact can serve as an example generator, a behavioral baseline for
-evaluation, or a concrete definition of "what good looks like" beyond
-what a few examples can capture. It is intent, not execution strategy,
-because the optimizer holds it fixed.
+The artifact says: "the behavior we want is whatever this existing system
+does, plus any improvements we can measure through the objective." It can
+serve as an example generator, a behavioral baseline for evaluation, or a
+concrete definition of "what good looks like." It is intent, not execution
+strategy, because the optimizer holds it fixed.
 
 ---
 
@@ -150,150 +202,325 @@ A module takes any signature and fulfills it. The contract is:
 ```
 
 That is all. The module decides HOW to produce the outputs — and HOW could
-be anything:
+be anything: an LM call, a regex, a Python function, an sklearn model, a
+PyTorch model, a vision model, a speech-to-speech pipeline, a small LM, a
+big LM, many LMs, or any combination.
 
-- an LM call with a prompt adapter
-- a regex
-- a Python function
-- an sklearn model
-- a PyTorch model
-- a vision model (SAM, image-to-text)
-- a speech-to-speech pipeline
-- a small LM, a big LM, or many LMs
-- any combination of the above
+### Modules are built, not just chosen
 
-The module decides what resources it needs internally. An LM-based module
-needs an LM and knows how to render the signature into a prompt and parse
-the response back into fields. A regex-based module needs a pattern. An ML
-module needs a model. A code module needs nothing external.
+Modules are not a fixed menu of presets. They are *built* — by humans or
+by optimizers. A module specification is a recipe that describes:
 
-The adapter concept — transforming between the signature's semantic fields
-and whatever the runner natively understands — is part of the module's
-internal strategy. It can be hand-written, auto-generated, or unnecessary
-depending on the runner. It is not a fixed part of the contract.
+- **Runner**: what executes (LM, regex, code, ML model, vision model, etc.)
+- **Adapter**: how to transform between signature fields and the runner's
+  native format (can be auto-generated)
+- **Generation strategy**: what hidden fields to add, what hint and notes
+  to set (prompt engineering)
+- **Control flow**: loops, retries, tool calls, streaming, voting
+- **Parameters**: temperature, max iterations, model name, etc.
 
-This is also where hidden fields, hint text, and field notes live — the
-module adds them internally as part of its strategy. Prompt engineering
-belongs here, not in the intent.
+This recipe must be readable and writable by both humans and AI, because
+the optimizer needs to produce, mutate, and evaluate candidate strategies.
 
-### Pure generation strategies
+### Example: three modules for the same triage intent
 
-These modules augment the signature with hidden fields, then predict.
+The same triage signature from Level 1 can be fulfilled by completely
+different modules. Each one is a different answer to "how do we produce
+severity, team, and customer_visible from a support_request?"
 
-**chain_of_thought**: Takes the signature, internally adds
-`.via("reasoning")`, calls predict. The LM sees the reasoning field and
-fills it before filling the outputs. The user never writes `.via()` — the
-module handles it.
+**Direct LM call.** The simplest module — hand the signature to an LM.
 
-Any module that works by adding hidden fields is in this category. You
-could write `plan_first` (adds `.via("plan")`), `evidence_then_answer`
-(adds `.via("evidence")`), etc. They all augment the signature and predict.
+```python
+simple = Module(
+    runner=LM("gpt-4o-mini", temperature=0.0),
+)
 
-### Pure procedural strategies
+result = simple(triage, {"support_request": "I was charged twice."})
+# => {"severity": "high", "team": "billing", "customer_visible": True}
+```
 
-These modules wrap predict in control flow without changing the signature.
+The module auto-generates an adapter: it renders the signature's fields
+and types into a prompt, calls the LM, and parses the structured response
+back into a dict.
 
-**ensemble**: Calls predict N times, votes across the results. The
-signature and each LM call are unchanged — only the surrounding code
-differs.
+**LM with reasoning.** Add a hidden reasoning field so the LM thinks
+before classifying.
 
-**fallback**: Tries one module, catches failure, falls back to another.
-Pure error handling.
+```python
+with_reasoning = Module(
+    runner=LM("gpt-4o", temperature=0.0),
+    via=[("reasoning", {"note": "Analyze the request before classifying."})],
+    hint="Read the support request carefully. Consider what the customer "
+         "is experiencing and which team can resolve it.",
+)
 
-**refine**: Calls predict, runs a validator, retries on failure. The
-validation and retry loop are procedural. The signature is not augmented.
+result = with_reasoning(triage, {"support_request": "I was charged twice."})
+# => {"severity": "high", "team": "billing", "customer_visible": True}
+```
 
-### Mixed strategies
+The reasoning field is produced by the LM but not returned to the caller —
+it is an internal artifact of this execution strategy. A different module
+might not use reasoning at all.
 
-These modules augment the signature AND run code between LM calls.
+**Sklearn model.** No LM, no prompt, no reasoning. A trained classifier
+that maps text to labels.
 
-**react**: Adds `.via("reasoning")`, then enters a tool loop. Calls the
-LM, parses a tool action, executes the tool, injects the observation,
-repeats. Both generation strategy (hidden fields) and procedural code
-(tool loop).
+```python
+from_sklearn = Module(
+    runner=SklearnModel("triage_classifier.joblib"),
+)
 
-**code_exec**: Adds a code field, then runs a generate-lint-fix loop.
-Both generation strategy and procedural code.
+result = from_sklearn(triage, {"support_request": "I was charged twice."})
+# => {"severity": "high", "team": "billing", "customer_visible": True}
+```
 
-### Exotic strategies
+The module knows how to extract features from the input text and map the
+model's output back to the signature's typed fields. No adapter needed —
+the runner already speaks in dicts.
 
-At the far end, strategies that deeply interleave code with LM execution.
+All three modules fulfill the same signature with the same contract. The
+optimizer can evaluate all three against the same examples and objective,
+then pick the one with the best score-cost tradeoff.
 
-**Streaming token detection**: The LM streams tokens. Code monitors the
-stream, detects a pattern, pauses generation, runs external code, injects
-results, resumes via assistant prefill.
+### Building from presets
 
-**Multi-model orchestration**: One LM generates a plan. Code dispatches
-subtasks to different LMs. Results are collected and merged.
+Presets are named starting points. Each preset already knows its own
+generation strategy — `chain_of_thought` adds reasoning internally,
+`react` adds reasoning and a tool loop. The user specifies the runner
+and parameters, not the preset's internal decomposition:
 
-### The spectrum is smooth
+```python
+# chain_of_thought internally adds via("reasoning") and predicts
+module = chain_of_thought(runner=LM("gpt-4o"))
 
-A user can move along this spectrum incrementally:
+# refine wraps another module in a validation loop
+module = refine(
+    chain_of_thought(runner=LM("gpt-4o")),
+    check=lambda result: (
+        None if result["severity"] in ("low", "medium", "high", "critical")
+        else "Invalid severity value"
+    ),
+    max_retries=3,
+)
 
-1. Start with `predict`. The signature's output fields are filled by one
-   LM call.
+# ensemble runs multiple modules and votes
+module = ensemble(
+    chain_of_thought(runner=LM("gpt-4o")),
+    chain_of_thought(runner=LM("claude-3-5-sonnet")),
+    n=3,
+)
+```
 
-2. Switch to `chain_of_thought` when you want the module to add a
-   reasoning step. Still one predict call, but the signature is augmented
-   internally.
+Presets are convenient but not special. They are just named recipes that
+configure the same underlying building blocks. If you want to control
+which hidden fields are added, build from scratch with `Module(...)`.
 
-3. Wrap in `ensemble` or `refine` when you want reliability through
-   repetition. Pure procedural — the predict call is unchanged.
+### What an optimizer produces
 
-4. Switch to `react` when you need tool calls. Now the module both
-   augments the signature and runs procedural code between LM calls.
+An optimizer searches over module specifications. Each candidate is a
+concrete recipe evaluated against the fixed Signature:
 
-5. Write a custom module when you need streaming detection, prefill
-   tricks, or any other exotic strategy.
+```python
+# The optimizer tries these candidates for the same triage intent:
 
-At every level, the contract is the same. The signature says WHAT to
-produce. The module says HOW to produce it. The optimizer can swap
-modules freely because the intent is fixed.
+candidates = [
+    # Cheap and fast — no reasoning, small model
+    Module(runner=LM("gpt-4o-mini", temperature=0.0)),
+
+    # Careful reasoning, bigger model
+    Module(
+        runner=LM("gpt-4o", temperature=0.0),
+        via=[("reasoning", {"note": "Analyze the customer's situation."})],
+        hint="Consider urgency, affected system, and customer impact.",
+    ),
+
+    # Multi-step: classify severity first, then route
+    Module(
+        runner=LM("claude-3-5-sonnet", temperature=0.0),
+        via=[
+            ("urgency_analysis", {"note": "How urgent is this?"}),
+            ("system_analysis", {"note": "What system is affected?"}),
+        ],
+        hint="Analyze urgency and affected system separately, then decide.",
+    ),
+
+    # Skip the LM entirely
+    Module(runner=SklearnModel("triage_v3.joblib")),
+
+    # Ensemble: vote across two models
+    ensemble(
+        Module(runner=LM("gpt-4o", temperature=0.0)),
+        Module(runner=LM("claude-3-5-sonnet", temperature=0.0)),
+        n=3,
+    ),
+]
+
+# Every candidate is evaluated against the same intent:
+for candidate in candidates:
+    score = evaluate(triage, candidate, test_set)
+    print(f"{candidate}: {score}")
+```
+
+Because module specs are data (not opaque Python functions), the optimizer
+can serialize and log every candidate, mutate specs (add a via field,
+change the runner, tweak temperature), crossover specs, or generate
+entirely new ones.
+
+### The strategy spectrum
+
+Module strategies range from simple to exotic:
+
+**Pure generation**: augment the signature with hidden fields, then
+predict. Chain-of-thought is here — it just adds `.via("reasoning")`.
+
+**Pure procedural**: wrap a runner in control flow without changing the
+signature. Ensemble (majority voting), fallback, and refine are here.
+
+**Mixed**: augment the signature AND run code between runner calls. ReAct
+(tool loop) and code_exec (generate-lint-fix loop) are here.
+
+**Exotic**: deeply interleave code with runner execution. Streaming token
+detection, assistant prefill manipulation, multi-model orchestration.
+
+The spectrum is smooth. At every level, the contract is the same:
+`(sig, inputs) -> dict`.
 
 ---
 
 ## Level 3: Composition (Graphs)
 
 Wire multiple steps together when the task needs several module calls,
-retrieval, SQL execution, or reusable subgraphs.
+retrieval, SQL execution, or reusable subgraphs. Each node in the graph
+has an inner signature and a module. The graph handles data flow.
+
+### Example: triage with context lookup
+
+The triage task might benefit from looking up the customer's history
+before classifying. That requires two steps — retrieval, then triage —
+which is a graph:
+
+```python
+from onux import Input, Model
+from onux.layers import Generate, Retrieve
+
+support_request = Input("support_request")
+
+# Step 1: retrieve past tickets for this customer
+past_tickets = Retrieve(
+    runner=VectorDB("tickets_index"),
+    top_k=5,
+)(support_request)
+
+# Step 2: triage with context — uses the triage signature internally
+severity, team, customer_visible = Generate(
+    outputs=(
+        ("severity", Severity),
+        ("team", Team),
+        ("customer_visible", bool),
+    ),
+    runner=LM("gpt-4o", temperature=0.0),
+    via=[("reasoning", {"note": "Consider past tickets and current request."})],
+)([support_request, past_tickets])
+
+triage_pipeline = Model(
+    inputs=support_request,
+    outputs=[severity, team, customer_visible],
+    name="triage_with_context",
+)
+
+triage_pipeline.summary()
+# Model: "triage_with_context"
+# Inputs:
+#   - support_request: str
+# Outputs:
+#   - severity: Severity (public)
+#   - team: Team (public)
+#   - customer_visible: bool (public)
+# Graph:
+#   - [1] Retrieve(past_tickets) <- support_request
+#   - [2] Generate(severity, team, customer_visible) <- support_request, past_tickets
+```
+
+### Example: research pipeline
+
+A more complex graph with multiple LM calls, retrieval, and critique:
 
 ```python
 question = Input("question")
-context = Retrieve()(question)
-answer = Generate("answer")([question, context])
-model = Model(inputs=question, outputs=answer)
+constraints = Input("constraints", type=list[str])
+
+sources = Retrieve(runner=VectorDB("docs_index"), top_k=10)(question)
+
+draft = Generate(
+    "draft",
+    runner=LM("gpt-4o"),
+    via=[("reasoning", {"note": "Work through the problem."})],
+)([question, constraints, sources])
+
+critique = Generate(
+    "critique",
+    runner=LM("claude-3-5-sonnet", temperature=0.0),
+    hint="Find factual errors, unsupported claims, and gaps.",
+)([question, draft, sources])
+
+final_answer, confidence = Generate(
+    outputs=(("final_answer", str), ("confidence", float)),
+    runner=LM("gpt-4o"),
+    hint="Revise the draft based on the critique.",
+)([question, constraints, sources, draft, critique])
+
+research = Model(
+    inputs=[question, constraints],
+    outputs=[final_answer, confidence],
+    name="research_pipeline",
+)
 ```
 
-Each node in the graph has an inner signature and a module. The graph
-handles data flow between nodes.
+Each node is independently configurable — different runners, different
+strategies, different prompt engineering. The graph handles data flow
+between them.
 
 ---
 
-## What this means for `.via()`, `.hint()`, and `.note()`
+## What belongs where
 
-These methods stay on Signature — modules need them internally to augment
-signatures as part of their strategy. But users should not need to call
-them when specifying intent.
+### On Signature (intent)
 
-- `.via()` adds hidden fields. Modules call it internally.
-- `.hint()` sets task-level prompt text. Modules or adapters set it.
-- `.note()` sets per-field prompt text. Modules or adapters set it.
+Only what the optimizer holds fixed:
 
-The teaching order is:
+- Input and output field names
+- Types
+- Examples
+- Objective (rubrics and metrics)
+- Reference artifacts
+
+### On the module (execution strategy)
+
+Everything the optimizer searches over:
+
+- Runner choice (LM, regex, ML model, code, vision model, etc.)
+- Adapter (rendering inputs for the runner, parsing outputs back to
+  fields — can be auto-generated)
+- Prompt engineering (hint text, field notes)
+- Decomposition (hidden fields via `.via()`)
+- Control flow (loops, retries, tool calls, streaming)
+- Runner parameters (temperature, model name, etc.)
+
+### Teaching order
 
 1. **Specify intent.** Write a Signature with inputs, outputs, types,
-   examples, and objective. No `.via()`, `.hint()`, or `.note()`.
+   examples, and objective.
 
-2. **Choose a module.** The module adds whatever hidden fields, hints,
-   and notes it needs. `chain_of_thought` adds reasoning. `react` adds
-   reasoning and a tool loop. The user picks the strategy, not the
-   prompt details.
+2. **Build a module.** Start from a preset or from scratch. The module
+   specifies the runner, adapter, hidden fields, prompt engineering,
+   control flow — everything about how to fulfill the intent. Or let
+   the optimizer build and search over candidates for you.
 
 3. **Wire a graph** if the task needs multiple steps.
 
-If a power user wants to manually call `.via()`, `.hint()`, or `.note()`
-on a signature, they can. But the primary path should be: specify intent,
-choose module, let the module handle prompt engineering and decomposition.
+`.via()`, `.hint()`, and `.note()` stay on Signature as building blocks
+that modules use internally. But the primary user path is: specify intent,
+build module (or let the optimizer build one).
 
 ### Why this matters for optimization
 
@@ -311,35 +538,18 @@ decisions. The moment `.via("reasoning")` or `.hint("Answer briefly.")`
 is part of the user's intent specification, the optimizer cannot freely
 change it without conflicting with what the user asked for.
 
----
-
-## What does not belong in a Signature
-
 ### Runtime telemetry
 
 Values like `latency_ms`, `cost_usd`, `prompt_tokens`, `retry_count` are
-not task fields. They are execution telemetry. Metrics can ask for a
-`runtime` parameter, and `.evaluate()` accepts a `runtime` keyword.
+not task fields and not execution strategy. They are execution telemetry.
+Metrics can ask for a `runtime` parameter, and `.evaluate()` accepts a
+`runtime` keyword.
 
-### Judge LMs and adapters
+### Rubric judging
 
 How rubrics get scored is an evaluation execution concern. The signature
 says *what* to score. A future `Evaluator` helper could automate rubric
-judging with a judge LM, but that does not need to change the Signature.
-
-### Prompt rendering and adaptation
-
-How the signature is rendered into a prompt (or transformed into whatever
-the runner natively understands) is the module's job. The signature
-describes the semantic structure. The module and its adapter handle
-presentation. The adapter itself can be auto-generated.
-
-### Hidden fields, hints, and notes
-
-Hidden fields, hint text, and field notes are execution strategy. They
-belong in modules, not in the user's intent specification. `.via()`,
-`.hint()`, and `.note()` exist on Signature as building blocks for modules
-and adapters, not as primary user-facing APIs for intent.
+judging, but that does not need to change the Signature.
 
 ---
 
@@ -377,13 +587,12 @@ The honest truth is:
 
 - **A Signature says WHAT to produce.** Inputs, outputs, types, examples,
   objective. It is the behavioral target the optimizer holds fixed.
-- **A module says HOW to produce it.** The runner could be an LM, a
-  regex, a Python function, an ML model, a vision model, or any
-  combination. The strategy could be pure generation (chain-of-thought),
-  pure procedural (ensemble, refine), mixed (ReAct, code_exec), or
-  exotic (streaming detection, prefill manipulation). The adapter, prompt
-  engineering, hidden fields, and runner choice all live here. The
-  spectrum is smooth.
+- **A module says HOW to produce it.** Modules are built, not just chosen
+  from a menu. A module spec is a recipe: runner, adapter, hidden fields,
+  prompt engineering, control flow. Both humans and optimizers build them.
+  Presets like `chain_of_thought` and `react` are named starting points.
+  The runner could be an LM, a regex, code, an ML model, a vision model,
+  or any combination. The spectrum from simple to exotic is smooth.
 - **A graph wires multiple modules together.** Each node has a signature
   and a module. The graph handles data flow.
 - **The optimizer test keeps the boundary clean.** If an optimizer would
