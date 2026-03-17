@@ -9,7 +9,7 @@ from .examples import ExamplesTable, infer_type as _infer_type, normalize_exampl
 
 @dataclass(frozen=True)
 class Field:
-    """Describe one named field inside a :class:`Signature`.
+    """Describe one named field inside a `Signature`.
 
     A field is the smallest unit in a signature. It records four things: the
     field name, where that field sits in the task pipeline, its coarse Python
@@ -28,7 +28,7 @@ class Field:
 
     Examples
     --------
-    Create a plain input field:
+    Create a plain input field.
 
     >>> field = Field("question", "input")
     >>> field.name
@@ -38,7 +38,7 @@ class Field:
     >>> field.type_ is str
     True
 
-    Add a type and a short note when you want the field to carry more intent:
+    Add a type and a short note when you want the field to carry more intent.
 
     >>> score = Field("score", "output", float, "Probability from 0 to 1")
     >>> score.type_ is float
@@ -55,7 +55,7 @@ class Field:
 
 @dataclass(frozen=True)
 class ObjectiveTerm:
-    """Represent one scoring term inside an :class:`Objective`.
+    """Represent one scoring term inside an `Objective`.
 
     Objective terms let you say *how* a signature should be judged. In practice
     there are two common shapes:
@@ -76,7 +76,7 @@ class ObjectiveTerm:
 
     Examples
     --------
-    Build a rubric term directly:
+    Build a rubric term directly.
 
     >>> term = ObjectiveTerm("rubric", "Is the answer correct?", weight=2.0, name="correctness")
     >>> term.kind
@@ -84,7 +84,7 @@ class ObjectiveTerm:
     >>> term.weight
     2.0
 
-    Most code is a little nicer when you use the convenience constructors:
+    Most code is a little nicer when you use the convenience constructors.
 
     >>> rubric = ObjectiveTerm.rubric("Be concise.", name="brevity")
     >>> rubric.kind
@@ -186,7 +186,7 @@ class Objective:
 
     Examples
     --------
-    Build an objective from a pair of rubric terms:
+    Build an objective from a pair of rubric terms.
 
     >>> objective = Objective(
     ...     terms=(
@@ -199,7 +199,7 @@ class Objective:
     >>> objective.reduce
     'weighted_mean'
 
-    Callable terms fit alongside rubric terms when you want a mixed objective:
+    Callable terms fit alongside rubric terms when you want a mixed objective.
 
     >>> def exact_match(answer: str, reference: str) -> float:
     ...     return float(answer == reference)
@@ -235,8 +235,8 @@ class Signature:
 
     A signature starts with a small formula made of field names only:
 
-    - ``inputs -> outputs``
-    - ``inputs -> hidden -> outputs``
+    - `inputs -> outputs`
+    - `inputs -> hidden -> outputs`
 
     From there you can layer in richer intent: types, notes, examples, hidden
     intermediate fields, and numeric objectives. The object is immutable, so
@@ -245,7 +245,7 @@ class Signature:
 
     Examples
     --------
-    Start with the smallest useful signature:
+    Start with the smallest useful signature.
 
     >>> sig = Signature("question -> answer")
     >>> sig.formula
@@ -255,7 +255,7 @@ class Signature:
     >>> list(sig.output_fields)
     ['answer']
 
-    Add types and notes when you want the contract to say a bit more:
+    Add types and notes when you want the contract to say a bit more.
 
     >>> typed = (
     ...     Signature("question -> answer, confidence")
@@ -267,7 +267,7 @@ class Signature:
     >>> typed.output_fields["confidence"].note
     'Number from 0 to 1'
 
-    Add a hidden field when the task has an explicit intermediate step:
+    Add a hidden field when the task has an explicit intermediate step.
 
     >>> reasoned = Signature("question -> answer").via("reasoning", note="Work shown for inspection")
     >>> reasoned.formula
@@ -318,7 +318,7 @@ class Signature:
         ----------
         formula : str | None, optional
             Formula describing the task structure, for example
-            ``"question -> answer"`` or ``"question -> reasoning -> answer"``.
+            `"question -> answer"` or `"question -> reasoning -> answer"`.
         examples : Any | None, optional
             Canonical examples attached to the signature. These examples may
             also be used to infer coarse field types.
@@ -336,13 +336,13 @@ class Signature:
 
         Examples
         --------
-        Construct a signature from a formula:
+        Construct a signature from a formula.
 
         >>> sig = Signature("question, context -> answer")
         >>> sig.formula
         'question, context -> answer'
 
-        Example data can infer coarse types for you:
+        Example data can infer coarse types for you.
 
         >>> sig = Signature(
         ...     "question -> answer, confidence",
@@ -353,7 +353,7 @@ class Signature:
         >>> sig.output_fields["confidence"].type_ is float
         True
 
-        When you do not provide a hint, a plain-English default is created:
+        When you do not provide a hint, a plain-English default is created.
 
         >>> Signature("question -> answer")._hint
         'Given `question`, produce `answer`.'
@@ -398,7 +398,7 @@ class Signature:
         >>> Signature("question -> answer").formula
         'question -> answer'
 
-        Hidden fields are included when present:
+        Hidden fields are included when present.
 
         >>> Signature("question -> answer").via("reasoning").formula
         'question -> reasoning -> answer'
@@ -415,7 +415,7 @@ class Signature:
         Returns
         -------
         Any | None
-            The original example payload, or ``None`` when no examples are
+            The original example payload, or `None` when no examples are
             attached.
 
         Examples
@@ -455,7 +455,7 @@ class Signature:
         Returns
         -------
         Objective | None
-            The attached objective, or ``None`` when the signature has no
+            The attached objective, or `None` when the signature has no
             objective yet.
 
         Examples
@@ -591,13 +591,13 @@ class Signature:
 
         Examples
         --------
-        Add one note:
+        Add one note.
 
         >>> sig = Signature("question -> answer").note(answer="A short factual response")
         >>> sig.output_fields['answer'].note
         'A short factual response'
 
-        Or annotate several fields at once:
+        Or annotate several fields at once.
 
         >>> richer = Signature("question, context -> answer").note(
         ...     question="User's request",
@@ -635,13 +635,13 @@ class Signature:
 
         Examples
         --------
-        Set one output type explicitly:
+        Set one output type explicitly.
 
         >>> sig = Signature("review -> sentiment").type(sentiment=float)
         >>> sig.output_fields['sentiment'].type_ is float
         True
 
-        Or update several fields together:
+        Or update several fields together.
 
         >>> richer = Signature("question -> answer, confidence").type(answer=str, confidence=float)
         >>> richer.output_fields['answer'].type_ is str
@@ -680,7 +680,7 @@ class Signature:
 
         Examples
         --------
-        Add a couple of canonical rows:
+        Add a couple of canonical rows.
 
         >>> sig = Signature("question -> answer").examples([
         ...     {"question": "2 + 2", "answer": "4"},
@@ -691,7 +691,7 @@ class Signature:
         >>> sig.example_data[0]['question']
         '2 + 2'
 
-        Because examples are normalized, they can also be used to infer types:
+        Because examples are normalized, they can also be used to infer types.
 
         >>> typed = Signature(
         ...     "ticket -> label, priority",
@@ -719,15 +719,15 @@ class Signature:
 
         - a rubric string, to be judged numerically by an external judge
         - a Python scoring callable
-        - an :class:`ObjectiveTerm`
-        - a fully constructed :class:`Objective`
+        - an `ObjectiveTerm`
+        - a fully constructed `Objective`
 
         Parameters
         ----------
         *terms : str | Callable[..., Any] | ObjectiveTerm | Objective
             Objective terms to attach.
         weights : tuple[float, ...] | None, optional
-            Optional weights aligned with ``terms``.
+            Optional weights aligned with `terms`.
         reduce : {"weighted_mean"}, default="weighted_mean"
             Aggregation rule used when combining term scores.
 
@@ -738,7 +738,7 @@ class Signature:
 
         Examples
         --------
-        Start with a single rubric term:
+        Start with a single rubric term.
 
         >>> sig = Signature("question -> answer").objective("Correct and concise.")
         >>> len(sig.objective_spec.terms)
@@ -747,7 +747,7 @@ class Signature:
         'rubric'
 
         Add several rubric terms and weight them differently when one matters
-        more than another:
+        more than another.
 
         >>> weighted = Signature("question -> answer").objective(
         ...     "Factually correct.",
@@ -757,7 +757,7 @@ class Signature:
         >>> [term.weight for term in weighted.objective_spec.terms]
         [3.0, 1.0]
 
-        Mix rubric terms with Python scorers for a richer evaluation:
+        Mix rubric terms with Python scorers for a richer evaluation.
 
         >>> def exact_match(answer: str, expected: str) -> float:
         ...     return float(answer == expected)
@@ -771,8 +771,7 @@ class Signature:
         >>> mixed.objective_spec.terms[1].name
         'exact_match'
 
-        If you already have a complete :class:`Objective`, you can pass it in as
-        is:
+        If you already have a complete `Objective`, you can pass it in as is.
 
         >>> prebuilt = Objective((ObjectiveTerm.rubric("Polite and helpful."),))
         >>> sig = Signature("question -> answer").objective(prebuilt)
@@ -790,8 +789,8 @@ class Signature:
     def rubric(self, text: str, *, weight: float = 1.0, name: str | None = None) -> Signature:
         """Return a copy with a single rubric objective term.
 
-        This is a small convenience wrapper around :meth:`objective` for the
-        common case where you only want one rubric term.
+        This is a small convenience wrapper around `objective` for the common
+        case where you only want one rubric term.
 
         Parameters
         ----------
@@ -852,7 +851,7 @@ class Signature:
 
         Examples
         --------
-        Add one hidden field:
+        Add one hidden field.
 
         >>> sig = Signature("question -> answer").via("reasoning")
         >>> sig.formula
@@ -860,7 +859,17 @@ class Signature:
         >>> sig.hidden_fields['reasoning'].role
         'hidden'
 
-        You can keep layering hidden fields when the task has several stages:
+        Hidden fields can also carry types and notes.
+
+        >>> inspected = Signature("question -> answer").via(
+        ...     "reasoning",
+        ...     str,
+        ...     note="Work shown for auditing",
+        ... )
+        >>> inspected.hidden_fields['reasoning'].note
+        'Work shown for auditing'
+
+        You can keep layering hidden fields when the task has several stages.
 
         >>> staged = (
         ...     Signature("question -> answer")
@@ -941,13 +950,13 @@ class Signature:
 
         Examples
         --------
-        Remove an output field you no longer need:
+        Remove an output field you no longer need.
 
         >>> sig = Signature("question -> answer, confidence").remove("confidence")
         >>> sig.formula
         'question -> answer'
 
-        The same works for hidden fields:
+        The same works for hidden fields.
 
         >>> staged = Signature("question -> answer").via("reasoning")
         >>> stripped = staged.remove("reasoning")
@@ -972,11 +981,11 @@ class Signature:
         Notes
         -----
         Callable objective terms are serialized by name only. Their executable
-        Python bodies are not reconstructed by :meth:`load_state`.
+        Python bodies are not reconstructed by `load_state`.
 
         Examples
         --------
-        Serialize a small signature:
+        Serialize a small signature.
 
         >>> state = (
         ...     Signature("question -> answer")
@@ -994,7 +1003,7 @@ class Signature:
         >>> state['objective']['terms'][0]['kind']
         'rubric'
 
-        This is especially handy for round-tripping through JSON-like storage:
+        This is especially handy for round-tripping through JSON-like storage.
 
         >>> restored = Signature.load_state(state)
         >>> restored == Signature.load_state(state)
@@ -1034,7 +1043,7 @@ class Signature:
         Parameters
         ----------
         state : dict[str, Any]
-            State previously produced by :meth:`dump_state`.
+            State previously produced by `dump_state`.
 
         Returns
         -------
@@ -1048,7 +1057,7 @@ class Signature:
 
         Examples
         --------
-        Round-trip a signature through serialized state:
+        Round-trip a signature through serialized state.
 
         >>> original = (
         ...     Signature("question -> answer, confidence")
