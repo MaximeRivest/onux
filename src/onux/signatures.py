@@ -5,35 +5,19 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Annotated, Any, Iterable, Literal, Mapping, get_args, get_origin
 
-import annotated_types as at
-
 
 @dataclass(frozen=True)
-class Desc(at.BaseMetadata):
+class Description:
     """Human-readable description attached to a type.
 
     Examples:
-        >>> Rating = Annotated[float, at.Ge(0), at.Le(5), Desc("star rating")]
+        >>> Rating = Annotated[float, Description("star rating")]
     """
 
     text: str
 
     def __describe__(self) -> str:
         return self.text
-
-
-_ANNOTATION_DESCRIPTIONS: dict[type, Any] = {
-    at.Ge: lambda a: f"≥ {a.ge}",
-    at.Le: lambda a: f"≤ {a.le}",
-    at.Gt: lambda a: f"> {a.gt}",
-    at.Lt: lambda a: f"< {a.lt}",
-    at.MultipleOf: lambda a: f"multiple of {a.multiple_of}",
-    at.Len: lambda a: (
-        f"length {a.min_length}–{a.max_length}"
-        if a.max_length is not None
-        else f"length ≥ {a.min_length}"
-    ),
-}
 
 
 @dataclass(frozen=True)
@@ -43,7 +27,7 @@ class Field:
     Attributes:
         name: Field name.
         role: One of ``"input"``, ``"hidden"``, or ``"output"``.
-        type_: Python type, possibly ``Annotated`` with constraints.
+        type_: Python type, possibly ``Annotated`` with a ``Description``.
     """
 
     name: str
@@ -63,15 +47,15 @@ class Field:
         return ()
 
     @property
-    def constraints(self) -> tuple[Any, ...]:
-        return tuple(a for a in self.annotations if not isinstance(a, Desc))
+    def description(self) -> str | None:
+        for a in self.annotations:
+            if isinstance(a, Description):
+                return a.text
+        return None
 
     @property
     def desc(self) -> str | None:
-        for a in self.annotations:
-            if isinstance(a, Desc):
-                return a.text
-        return None
+        return self.description
 
     @property
     def prefix(self) -> str:
@@ -94,7 +78,6 @@ _BUILTIN_TYPES: dict[str, type] = {
     "tuple": tuple,
     "set": set,
 }
-_INTERVAL_RE = re.compile(r"^(\w+)\[([^:]*):([^:]*)\]$")
 _ENUM_RE = re.compile(r"^\{([^}]+)\}$")
 
 
@@ -102,8 +85,8 @@ def describe_type(tp: Any) -> str:
     """Render a type as human-readable text.
 
     Examples:
-        >>> describe_type(Annotated[float, at.Ge(0), at.Le(5)])
-        'float (≥ 0, ≤ 5)'
+        >>> describe_type(Annotated[float, Description("star rating")])
+        'star rating: float'
         >>> describe_type(Literal["pos", "neg"])
         "one of: 'pos', 'neg'"
     """
@@ -114,19 +97,8 @@ def describe_type(tp: Any) -> str:
 
     if origin is Annotated:
         base, *annotations = get_args(tp)
-        descs: list[str] = []
-        constraints: list[str] = []
-        for annotation in annotations:
-            text = _describe_annotation(annotation)
-            if text is None:
-                continue
-            if isinstance(annotation, Desc):
-                descs.append(text)
-            else:
-                constraints.append(text)
+        descs = [text for annotation in annotations if (text := _describe_annotation(annotation)) is not None]
         result = describe_type(base)
-        if constraints:
-            result += " (" + ", ".join(constraints) + ")"
         if descs:
             result = ", ".join(descs) + ": " + result
         return result
@@ -146,9 +118,6 @@ def describe_type(tp: Any) -> str:
 def _describe_annotation(annotation: Any) -> str | None:
     if hasattr(annotation, "__describe__"):
         return annotation.__describe__()
-    for cls, fn in _ANNOTATION_DESCRIPTIONS.items():
-        if isinstance(annotation, cls):
-            return fn(annotation)
     return None
 
 
@@ -161,6 +130,9 @@ class ExamplesTable:
     - pandas DataFrame
     - polars DataFrame
     - duckdb relation
+    - pyarrow Table / RecordBatch
+    - pyspark DataFrame
+    - numpy structured array / recarray
     - list/iterable of dict records
 
     Internally we only need four things:
@@ -181,12 +153,23 @@ class ExamplesTable:
         raw = self.raw
         if hasattr(raw, "columns"):
             return [str(column) for column in raw.columns]
+        if hasattr(raw, "column_names"):
+            return [str(column) for column in raw.column_names]
+        if hasattr(raw, "dtype") and getattr(raw.dtype, "names", None):
+            return [str(column) for column in raw.dtype.names]
         if hasattr(raw, "schema"):
             schema = raw.schema
             if isinstance(schema, Mapping):
                 return [str(column) for column in schema.keys()]
             if hasattr(schema, "names"):
                 return [str(column) for column in schema.names]
+            if hasattr(schema, "fieldNames"):
+                return [str(column) for column in schema.fieldNames()]
+        if hasattr(raw, "dtypes"):
+            try:
+                return [str(column) for column, _ in raw.dtypes]
+            except Exception:  # noqa: BLE001
+                pass
         records = self.to_records()
         return list(records[0].keys()) if records else []
 
@@ -355,7 +338,9 @@ class Signature:
         new_fields = []
         for field in self._fields:
             if field.name in descriptions:
-                new_fields.append(Field(field.name, field.role, _add_annotation(field.type_, Desc(descriptions[field.name]))))
+                new_fields.append(
+                    Field(field.name, field.role, _add_annotation(field.type_, Description(descriptions[field.name])))
+                )
             else:
                 new_fields.append(field)
         return Signature(_fields=tuple(new_fields), instructions=self._instructions, _examples=self._examples)
@@ -371,7 +356,7 @@ class Signature:
     def via(self, name: str, type_: type = str, *, desc: str | None = None) -> Signature:
         """Return a new signature factored through one more hidden field."""
         if desc is not None:
-            type_ = _add_annotation(type_, Desc(desc))
+            type_ = _add_annotation(type_, Description(desc))
         fields = list(self._fields)
         insert_at = len(fields)
         for i, field in enumerate(fields):
@@ -384,7 +369,7 @@ class Signature:
     def add(self, name: str, type_: type = str, *, desc: str | None = None) -> Signature:
         """Return a new signature with one more output field."""
         if desc is not None:
-            type_ = _add_annotation(type_, Desc(desc))
+            type_ = _add_annotation(type_, Description(desc))
         return Signature(
             _fields=tuple([*self._fields, Field(name, "output", type_)]),
             instructions=self._instructions,
@@ -417,7 +402,7 @@ class Signature:
                     "name": field.name,
                     "role": field.role,
                     "type": field.base_type.__name__,
-                    "desc": field.desc,
+                    "description": field.description,
                 }
                 for field in self._fields
             ],
@@ -430,8 +415,9 @@ class Signature:
         fields = []
         for item in state["fields"]:
             type_ = _BUILTIN_TYPES.get(item["type"], str)
-            if item.get("desc"):
-                type_ = _add_annotation(type_, Desc(item["desc"]))
+            description = item.get("description") or item.get("desc")
+            if description:
+                type_ = _add_annotation(type_, Description(description))
             fields.append(Field(item["name"], item["role"], type_))
         examples = _normalize_examples(state["examples"]) if state.get("examples") is not None else None
         return cls(_fields=tuple(fields), instructions=state["instructions"], _examples=examples)
@@ -455,7 +441,10 @@ class Signature:
         return hash((self._fields, self._instructions))
 
 
-__all__ = ["Desc", "Field", "Signature", "describe_type"]
+Desc = Description
+
+
+__all__ = ["Description", "Desc", "Field", "Signature", "describe_type"]
 
 
 def _normalize_examples(data: Any | None) -> ExamplesTable | None:
@@ -552,19 +541,11 @@ def _resolve_type_str(s: str, custom_types: dict[str, type] | None = None) -> ty
         values = tuple(v.strip() for v in match.group(1).split(","))
         return Literal[values]  # type: ignore[valid-type]
 
-    match = _INTERVAL_RE.match(s)
-    if match:
-        base_name, low, high = match.group(1), match.group(2).strip(), match.group(3).strip()
-        base = _resolve_simple_type(base_name, custom_types)
-        annotations: list[Any] = []
-        if base is str:
-            annotations.append(at.Len(int(low) if low else 0, int(high) if high else None))
-        else:
-            if low:
-                annotations.append(at.Ge(float(low) if base is float else int(low)))
-            if high:
-                annotations.append(at.Le(float(high) if base is float else int(high)))
-        return Annotated[tuple([base, *annotations])]  # type: ignore[return-value]
+    if "[" in s and "]" in s and ":" in s:
+        raise ValueError(
+            "Type constraints like 'float[0:1]' are no longer supported. "
+            "Use plain types and reflect constraints in your optimizer metric instead."
+        )
 
     return _resolve_simple_type(s, custom_types)
 

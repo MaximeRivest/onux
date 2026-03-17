@@ -20,9 +20,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = [
-  "annotated-types>=0.7.0",
-]
+dependencies = []
 
 [build-system]
 requires = ["uv_build>=0.9.26,<0.10.0"]

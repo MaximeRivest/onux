@@ -61,14 +61,13 @@ sig = sig.via("reasoning", desc="Step-by-step tax calculation")
 print(sig)
 ```
 
-### Constraints live in the type
+### Descriptions live in the type
 
 ```python
 from typing import Annotated, Literal
-import annotated_types as at
-from onux import Desc, Signature
+from onux import Description, Signature
 
-Rating = Annotated[float, at.Ge(0), at.Le(5), Desc("star rating")]
+Rating = Annotated[float, Description("star rating")]
 Sentiment = Literal["positive", "negative", "neutral"]
 
 review = Signature(
@@ -320,6 +319,7 @@ Top-level imports:
 ```python
 from onux import (
     Signature,
+    Description,
     Desc,
     describe_type,
     Input,

@@ -72,14 +72,13 @@ question -> answer
 1  Capital of France?  Paris
 ```
 
-## Constraints live in the type
+## Descriptions live in the type
 
 ```python
 from typing import Annotated, Literal
-import annotated_types as at
-from onux import Desc, describe_type
+from onux import Description, describe_type
 
-Rating = Annotated[float, at.Ge(0), at.Le(5), Desc("star rating")]
+Rating = Annotated[float, Description("star rating")]
 Sentiment = Literal["positive", "negative", "neutral"]
 
 review = Signature("text -> sentiment: Sentiment, rating: Rating, summary", types={
@@ -95,16 +94,16 @@ text -> sentiment, rating, summary
   'Given `text`, produce `sentiment`, `rating`, `summary`.'
   → text       str
   ← sentiment  one of: 'positive', 'negative', 'neutral'
-  ← rating     star rating: float (≥ 0, ≤ 5)
+  ← rating     star rating: float
   ← summary    str
-star rating: float (≥ 0, ≤ 5)
+star rating: float
 ```
 
 ## Update descriptions and types after the fact
 
 ```python
 review = review.describe(text="Product review text", summary="One-sentence summary")
-review = review.retype(summary=Annotated[str, at.Len(1, 280), Desc("Brief summary")])
+review = review.retype(summary=Annotated[str, Description("Brief summary")])
 print(review)
 ```
 
@@ -113,8 +112,8 @@ text -> sentiment, rating, summary
   'Given `text`, produce `sentiment`, `rating`, `summary`.'
   → text       Product review text: str
   ← sentiment  one of: 'positive', 'negative', 'neutral'
-  ← rating     star rating: float (≥ 0, ≤ 5)
-  ← summary    Brief summary: str (length 1–280)
+  ← rating     star rating: float
+  ← summary    Brief summary: str
 ```
 
 ## Add or remove outputs
