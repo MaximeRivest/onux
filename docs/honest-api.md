@@ -71,6 +71,14 @@ implementations:
 A key property of `Intent` is that it should survive changes in execution
 strategy.
 
+This is also where `Artifact` belongs. Here, an artifact is not an internal
+program artifact like `reasoning` or `draft_answer`. It is a **reference
+artifact**: an external system, binary, service, workflow, or model whose
+behavior helps define the target we care about. That makes it part of intent,
+not part of execution strategy. A reference artifact can anchor examples,
+serve as an example generator, and provide a concrete behavioral baseline for
+training, evaluation, migration, or replacement.
+
 These should all be different ways to satisfy the **same** intent:
 
 - answer directly
@@ -82,31 +90,53 @@ These should all be different ways to satisfy the **same** intent:
 ### Proposed API
 
 ```python
+from typing import Literal
 from onux import Artifact, Intent
 
 
-def single_sentence(answer: str) -> float:
-    sentence_marks = answer.count(".") + answer.count("!") + answer.count("?")
-    return float("\n" not in answer and sentence_marks <= 1)
+Severity = Literal["low", "medium", "high", "critical"]
+Team = Literal["billing", "bug", "feature", "account"]
+
+
+def valid_triage(severity: Severity, team: Team, customer_visible: bool) -> float:
+    return float(
+        severity in {"low", "medium", "high", "critical"}
+        and team in {"billing", "bug", "feature", "account"}
+        and isinstance(customer_visible, bool)
+    )
 
 
 intent = (
-    Intent("question -> answer")
-    .type(question=str, answer=str)
-    .note(
-        question="The user's request.",
-        answer="A direct final answer for the user.",
+    Intent("support_request -> severity, team, customer_visible")
+    .type(
+        severity=Severity,
+        team=Team,
+        customer_visible=bool,
     )
-    .hint("Answer in one sentence.")
+    .note(
+        severity="Operational urgency of the request.",
+        team="Owning team that should handle the request.",
+        customer_visible="Whether the issue is visible to the customer right now.",
+    )
     .examples([
-        {"question": "2 + 2", "answer": "4"},
-        {"question": "Capital of France", "answer": "Paris"},
+        {
+            "support_request": "I was charged twice for my subscription this month.",
+            "severity": "high",
+            "team": "billing",
+            "customer_visible": True,
+        },
+        {
+            "support_request": "The export button is misaligned in dark mode.",
+            "severity": "low",
+            "team": "bug",
+            "customer_visible": True,
+        },
     ])
-    .artifact(Artifact.service("legacy-qa-endpoint"))
+    .artifact(Artifact.service("legacy-support-triage"))
     .objective(
-        "Assign a score from 0 to 1 for factual correctness, where 1 means fully correct and 0 means clearly incorrect.",
-        "Assign a score from 0 to 1 for directness, where 1 means the answer directly addresses the user's question and 0 means it is evasive or off-topic.",
-        single_sentence,
+        "Assign a score from 0 to 1 for routing accuracy, where 1 means the request is assigned to the correct team and severity and 0 means the routing is clearly wrong.",
+        "Assign a score from 0 to 1 for operational usefulness, where 1 means the triage output would be immediately useful to a support organization and 0 means it would cause confusion or delays.",
+        valid_triage,
         (4.0, 2.0, 1.0),
     )
 )
@@ -117,6 +147,11 @@ how the system internally gets there. It includes stable behavioral structure
 (inputs, outputs, types, notes), reference examples, scoring criteria
 (rubrics and metrics), and even an external artifact whose behavior we may be
 trying to imitate or replace.
+
+This example also shows why typed outputs are often genuinely useful: they
+make parsing and downstream use part of the behavioral contract. Here the
+program is not just producing prose; it must emit structured values that other
+systems can reliably consume. Typed inputs are often less interesting for raw user text.
 
 ---
 
@@ -369,6 +404,13 @@ Examples:
 - an old model
 
 This deserves a first-class place in the intent layer.
+
+An `Artifact` is not an intermediate program artifact like `reasoning` or
+`draft_answer`. It is a **reference artifact**: an external thing whose
+behavior helps define the target we are trying to match, replace, or exceed.
+That makes it part of behavioral intent, not part of execution strategy. In
+practice, an artifact can guide dataset construction, evaluation, migration,
+and system acceptance even when it is never called at runtime.
 
 ### Proposed API
 
