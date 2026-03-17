@@ -37,10 +37,11 @@ This gives us a clean separation:
 - **Signature = intent.** What the task is, what good looks like. Elements
   in the signature are not parameters to optimize over — they are the
   fixed target the optimizer holds constant while it searches.
-- **Module = execution strategy.** How to fulfill the signature, including
-  what runner to use (LM, regex, ML model, code, vision model, etc.),
-  what adapter to use, what intermediate fields to generate, what hint
-  and field notes to use, and how to structure the execution.
+- **Module = strategy pattern.** The execution shape: control flow,
+  decomposition, runner type. Chain-of-thought, ReAct, ensemble, etc.
+- **Program = concrete candidate.** A module with every parameter pinned
+  down: specific runner, adapter, hint, via fields, temperature. What
+  the optimizer actually produces, evaluates, and saves.
 
 ---
 
@@ -193,45 +194,75 @@ strategy, because the optimizer holds it fixed.
 
 ---
 
-## Level 2: Execution strategy (Modules)
+## Level 2: Execution strategy (Modules and Programs)
 
-A module takes any signature and fulfills it. The contract is:
+There are two concepts at this level:
+
+- **Module** — a general strategy pattern. It defines the *shape* of the
+  execution: what kind of control flow, what kind of decomposition, what
+  kind of runner. But it leaves parameters open.
+
+- **Program** — a specification that pins down some or all of a module's
+  parameters. A fully pinned program can be executed, scored, serialized,
+  and compared. A partially pinned program defines a search space the
+  optimizer explores.
+
+Both fulfill the same contract:
 
 ```python
 (sig, inputs) -> dict
 ```
 
-That is all. The module decides HOW to produce the outputs — and HOW could
-be anything: an LM call, a regex, a Python function, an sklearn model, a
-PyTorch model, a vision model, a speech-to-speech pipeline, a small LM, a
-big LM, many LMs, or any combination.
+### Every axis is independently general or specific
 
-### Modules are built, not just chosen
+A program is not "general" or "specific" as a whole. Each axis can be
+pinned independently:
 
-Modules are not a fixed menu of presets. They are *built* — by humans or
-by optimizers. A module specification is a recipe that describes:
+| Axis | General | Specific |
+|---|---|---|
+| Runner | "any LM" | `LM("gpt-4o", temperature=0.0)` |
+| Runner (more specific) | `LM("gpt-4o")` | `LM("ft:gpt-4o:triage-v3")` |
+| Adapter | auto-generate | hand-written prompt template |
+| Via fields | "add some reasoning" | these exact fields with these notes |
+| Hint | "generate appropriate" | this exact text |
+| Control flow | "some retry strategy" | refine with this validator, max 3 |
 
-- **Runner**: what executes (LM, regex, code, ML model, vision model, etc.)
-- **Adapter**: how to transform between signature fields and the runner's
-  native format (can be auto-generated)
-- **Generation strategy**: what hidden fields to add, what hint and notes
-  to set (prompt engineering)
-- **Control flow**: loops, retries, tool calls, streaming, voting
-- **Parameters**: temperature, max iterations, model name, etc.
+A real program might pin the runner but leave hints open for the optimizer.
+Or use a specific finetuned model but auto-generate the adapter. Or fix
+the via fields but search over LMs. The axes are independent.
 
-This recipe must be readable and writable by both humans and AI, because
-the optimizer needs to produce, mutate, and evaluate candidate strategies.
+This means the optimizer can search over any combination of open axes
+while holding the pinned axes fixed. A "checkpoint" is a program where
+every axis is pinned — it is fully reproducible.
 
-### Example: three modules for the same triage intent
+### Modules: strategy patterns
 
-The same triage signature from Level 1 can be fulfilled by completely
-different modules. Each one is a different answer to "how do we produce
-severity, team, and customer_visible from a support_request?"
+A module defines the execution shape. Built-in modules include:
 
-**Direct LM call.** The simplest module — hand the signature to an LM.
+- **predict** — single runner call, no hidden fields
+- **chain_of_thought** — adds `.via("reasoning")`, then predicts
+- **react** — adds reasoning, enters a tool loop
+- **refine** — wraps another program in a validation-retry loop
+- **ensemble** — runs multiple programs, votes on the result
+- **fallback** — tries one program, falls back to another on failure
+- **code_exec** — generates code, runs it, fixes errors in a loop
+
+The module is independent of the runner type. `predict` works with an LM,
+an sklearn model, a regex, or a custom Python function. `ensemble` works
+with any combination of inner programs — one could be an LM, another a
+finetuned model, another a rule-based classifier.
+
+### Programs: from partial to fully specified
+
+A program pins down concrete choices on each axis. The more axes are
+pinned, the more concrete the program is.
+
+**Minimal program — only a runner.** Everything else is auto-generated
+or left at defaults.
 
 ```python
-simple = Module(
+simple = Program(
+    module=predict,
     runner=LM("gpt-4o-mini", temperature=0.0),
 )
 
@@ -239,17 +270,16 @@ result = simple(triage, {"support_request": "I was charged twice."})
 # => {"severity": "high", "team": "billing", "customer_visible": True}
 ```
 
-The module auto-generates an adapter: it renders the signature's fields
-and types into a prompt, calls the LM, and parses the structured response
-back into a dict.
+The adapter is auto-generated from the signature's fields and types.
+No hint, no via fields — the LM gets the bare task.
 
-**LM with reasoning.** Add a hidden reasoning field so the LM thinks
-before classifying.
+**Pinned strategy and hint, auto adapter.** The user controls the
+decomposition and prompt engineering but lets the adapter be generated.
 
 ```python
-with_reasoning = Module(
+with_reasoning = Program(
+    module=chain_of_thought,
     runner=LM("gpt-4o", temperature=0.0),
-    via=[("reasoning", {"note": "Analyze the request before classifying."})],
     hint="Read the support request carefully. Consider what the customer "
          "is experiencing and which team can resolve it.",
 )
@@ -258,15 +288,22 @@ result = with_reasoning(triage, {"support_request": "I was charged twice."})
 # => {"severity": "high", "team": "billing", "customer_visible": True}
 ```
 
-The reasoning field is produced by the LM but not returned to the caller —
-it is an internal artifact of this execution strategy. A different module
-might not use reasoning at all.
-
-**Sklearn model.** No LM, no prompt, no reasoning. A trained classifier
-that maps text to labels.
+**Finetuned model, no prompt engineering needed.** The model already
+knows the task — the adapter is trivial or unnecessary.
 
 ```python
-from_sklearn = Module(
+finetuned = Program(
+    module=predict,
+    runner=LM("ft:gpt-4o:triage-v3"),
+)
+```
+
+**Non-LM runner.** An sklearn classifier. No adapter, no hint, no
+reasoning. The runner already speaks in dicts.
+
+```python
+from_sklearn = Program(
+    module=predict,
     runner=SklearnModel("triage_classifier.joblib"),
 )
 
@@ -274,68 +311,55 @@ result = from_sklearn(triage, {"support_request": "I was charged twice."})
 # => {"severity": "high", "team": "billing", "customer_visible": True}
 ```
 
-The module knows how to extract features from the input text and map the
-model's output back to the signature's typed fields. No adapter needed —
-the runner already speaks in dicts.
-
-All three modules fulfill the same signature with the same contract. The
-optimizer can evaluate all three against the same examples and objective,
-then pick the one with the best score-cost tradeoff.
-
-### Building from presets
-
-Presets are named starting points. Each preset already knows its own
-generation strategy — `chain_of_thought` adds reasoning internally,
-`react` adds reasoning and a tool loop. The user specifies the runner
-and parameters, not the preset's internal decomposition:
+**Composite programs.** Ensemble and refine compose inner programs, each
+of which can be at a different level of specificity.
 
 ```python
-# chain_of_thought internally adds via("reasoning") and predicts
-module = chain_of_thought(runner=LM("gpt-4o"))
+# Ensemble: vote across a general LM and a finetuned model
+voted = Program(
+    module=ensemble,
+    programs=[
+        Program(module=chain_of_thought, runner=LM("gpt-4o", temperature=0.0)),
+        Program(module=predict, runner=LM("ft:gpt-4o:triage-v3")),
+        Program(module=predict, runner=SklearnModel("triage_v2.joblib")),
+    ],
+    n=3,
+)
 
-# refine wraps another module in a validation loop
-module = refine(
-    chain_of_thought(runner=LM("gpt-4o")),
+# Refine: validation loop around a chain-of-thought program
+checked = Program(
+    module=refine,
+    inner=Program(module=chain_of_thought, runner=LM("gpt-4o")),
     check=lambda result: (
         None if result["severity"] in ("low", "medium", "high", "critical")
         else "Invalid severity value"
     ),
     max_retries=3,
 )
-
-# ensemble runs multiple modules and votes
-module = ensemble(
-    chain_of_thought(runner=LM("gpt-4o")),
-    chain_of_thought(runner=LM("claude-3-5-sonnet")),
-    n=3,
-)
 ```
 
-Presets are convenient but not special. They are just named recipes that
-configure the same underlying building blocks. If you want to control
-which hidden fields are added, build from scratch with `Module(...)`.
+All programs fulfill the same signature with the same contract.
 
 ### What an optimizer produces
 
-An optimizer searches over module specifications. Each candidate is a
-concrete recipe evaluated against the fixed Signature:
+An optimizer searches over programs by varying open axes. Each candidate
+is evaluated against the fixed Signature:
 
 ```python
-# The optimizer tries these candidates for the same triage intent:
-
 candidates = [
-    # Cheap and fast — no reasoning, small model
-    Module(runner=LM("gpt-4o-mini", temperature=0.0)),
+    # Cheap and fast — small model, no reasoning
+    Program(module=predict, runner=LM("gpt-4o-mini", temperature=0.0)),
 
-    # Careful reasoning, bigger model
-    Module(
+    # Reasoning with a general model
+    Program(
+        module=chain_of_thought,
         runner=LM("gpt-4o", temperature=0.0),
-        via=[("reasoning", {"note": "Analyze the customer's situation."})],
         hint="Consider urgency, affected system, and customer impact.",
     ),
 
-    # Multi-step: classify severity first, then route
-    Module(
+    # Custom decomposition — optimizer-generated via fields and hint
+    Program(
+        module=predict,
         runner=LM("claude-3-5-sonnet", temperature=0.0),
         via=[
             ("urgency_analysis", {"note": "How urgent is this?"}),
@@ -344,27 +368,40 @@ candidates = [
         hint="Analyze urgency and affected system separately, then decide.",
     ),
 
-    # Skip the LM entirely
-    Module(runner=SklearnModel("triage_v3.joblib")),
+    # Finetuned model — no prompt engineering needed
+    Program(module=predict, runner=LM("ft:gpt-4o:triage-v3")),
 
-    # Ensemble: vote across two models
-    ensemble(
-        Module(runner=LM("gpt-4o", temperature=0.0)),
-        Module(runner=LM("claude-3-5-sonnet", temperature=0.0)),
+    # Trained classifier — skip the LM entirely
+    Program(module=predict, runner=SklearnModel("triage_v3.joblib")),
+
+    # Ensemble: general LM + finetuned + sklearn
+    Program(
+        module=ensemble,
+        programs=[
+            Program(module=chain_of_thought, runner=LM("gpt-4o")),
+            Program(module=predict, runner=LM("ft:gpt-4o:triage-v3")),
+            Program(module=predict, runner=SklearnModel("triage_v3.joblib")),
+        ],
         n=3,
     ),
 ]
 
-# Every candidate is evaluated against the same intent:
 for candidate in candidates:
     score = evaluate(triage, candidate, test_set)
     print(f"{candidate}: {score}")
 ```
 
-Because module specs are data (not opaque Python functions), the optimizer
-can serialize and log every candidate, mutate specs (add a via field,
-change the runner, tweak temperature), crossover specs, or generate
-entirely new ones.
+Every candidate gets the same Signature, examples, and objective.
+
+Because programs are data (not opaque Python functions), the optimizer
+can:
+
+- serialize, log, and reproduce every candidate
+- mutate programs (add a via field, swap the runner, tweak temperature)
+- crossover programs (combine the via fields of one with the runner of
+  another)
+- generate entirely new programs from scratch
+- save winning programs as checkpoints
 
 ### The strategy spectrum
 
@@ -494,43 +531,47 @@ Only what the optimizer holds fixed:
 - Objective (rubrics and metrics)
 - Reference artifacts
 
-### On the module (execution strategy)
+### On the module (strategy pattern)
 
-Everything the optimizer searches over:
+The general execution shape:
 
-- Runner choice (LM, regex, ML model, code, vision model, etc.)
-- Adapter (rendering inputs for the runner, parsing outputs back to
-  fields — can be auto-generated)
+- Control flow pattern (single call, loop, retry, vote, tool loop)
+- Decomposition pattern (which hidden fields to add)
+
+### On the program (concrete candidate)
+
+Everything the optimizer pins down for one candidate:
+
+- Module choice
+- Runner (LM, regex, ML model, code, vision model, etc.)
+- Adapter (can be auto-generated)
 - Prompt engineering (hint text, field notes)
-- Decomposition (hidden fields via `.via()`)
-- Control flow (loops, retries, tool calls, streaming)
 - Runner parameters (temperature, model name, etc.)
+- Control flow parameters (max retries, tool list, etc.)
 
 ### Teaching order
 
 1. **Specify intent.** Write a Signature with inputs, outputs, types,
    examples, and objective.
 
-2. **Build a module.** Start from a preset or from scratch. The module
-   specifies the runner, adapter, hidden fields, prompt engineering,
-   control flow — everything about how to fulfill the intent. Or let
-   the optimizer build and search over candidates for you.
+2. **Build a program.** Pick a module (strategy pattern), pin down the
+   runner and parameters. Or let the optimizer build and search over
+   candidate programs for you.
 
 3. **Wire a graph** if the task needs multiple steps.
 
 `.via()`, `.hint()`, and `.note()` stay on Signature as building blocks
-that modules use internally. But the primary user path is: specify intent,
-build module (or let the optimizer build one).
+that modules and programs use internally. But the primary user path is:
+specify intent, build program (or let the optimizer build one).
 
 ### Why this matters for optimization
 
 If intent and execution strategy are cleanly separated, an optimizer can:
 
 - Hold the Signature fixed (inputs, outputs, types, examples, objective)
-- Search over modules (predict, chain_of_thought, react, custom, or
-  non-LM strategies like regex, code, ML models)
-- Search over module internals (which runner, which adapter, which hidden
-  fields, hint text, field notes, how many retries, temperature)
+- Search over modules (predict, chain_of_thought, react, custom)
+- Search over programs within each module (which runner, which adapter,
+  which hidden fields, hint text, field notes, temperature, retries)
 - Evaluate every candidate against the same fixed objective
 
 This only works if the Signature does not contain execution strategy
@@ -573,26 +614,27 @@ based on which module you use. So it belongs on the Signature:
 | Examples | Signature | Behavioral specification |
 | Rubrics and metrics | Signature | Scoring criteria — define success |
 | Reference artifacts | Signature | Behavioral anchor |
-| Hint text | Module / adapter (internally) | Prompt engineering — optimizer searches over |
-| Field notes | Module / adapter (internally) | Prompt engineering — optimizer searches over |
-| Hidden intermediate fields | Module (internally) | Execution strategy — optimizer searches over |
-| Module choice | Module | Execution strategy |
-| Runner (LM, regex, ML, code, etc.) | Module (internally) | Execution strategy |
-| Adapter (prompt rendering, parsing) | Module (internally) | Execution strategy — can be auto-generated |
+| Strategy pattern | Module | Execution shape — control flow, decomposition |
+| Runner (LM, regex, ML, code, etc.) | Program | Concrete runner choice |
+| Adapter (prompt rendering, parsing) | Program | Can be auto-generated |
+| Hint text, field notes | Program | Prompt engineering |
+| Hidden intermediate fields | Program (via module) | Decomposition details |
+| Control flow parameters | Program | Retries, tool list, temperature, etc. |
 | Multi-step data flow | Graph (Layer, Model) | Composition of modules |
 | Runtime telemetry | `runtime` parameter | Not a task field |
-| Prompt rendering / adaptation | Module (internally) | Presentation — can be auto-generated |
 
 The honest truth is:
 
 - **A Signature says WHAT to produce.** Inputs, outputs, types, examples,
   objective. It is the behavioral target the optimizer holds fixed.
-- **A module says HOW to produce it.** Modules are built, not just chosen
-  from a menu. A module spec is a recipe: runner, adapter, hidden fields,
-  prompt engineering, control flow. Both humans and optimizers build them.
-  Presets like `chain_of_thought` and `react` are named starting points.
+- **A module defines the strategy pattern.** Chain-of-thought, ReAct,
+  ensemble, refine — these are execution shapes. They define control
+  flow and decomposition without pinning down specific parameters.
+- **A program is a fully specified candidate.** Module + runner + adapter
+  + hint + via fields + parameters. It can be executed, scored,
+  serialized, and compared. The optimizer produces and evaluates programs.
   The runner could be an LM, a regex, code, an ML model, a vision model,
-  or any combination. The spectrum from simple to exotic is smooth.
+  or any combination.
 - **A graph wires multiple modules together.** Each node has a signature
   and a module. The graph handles data flow.
 - **The optimizer test keeps the boundary clean.** If an optimizer would
