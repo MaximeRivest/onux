@@ -92,9 +92,26 @@ review = (
 print(review)
 ```
 
-### Data is dataframe-like, not pandas-only
+### Objectives can mix rubrics and scoring functions
 
-`Signature(..., data=...)` accepts tabular examples in any duck-typed
+```python
+def exact_match(example, prediction, *, signature=None):
+    return float(example["answer"] == prediction["answer"])
+
+qa = (
+    Signature("question -> answer")
+    .objective(
+        exact_match,
+        "Correct, concise, and grounded in the provided facts.",
+        weights=(0.8, 0.2),
+    )
+)
+print(qa)
+```
+
+### Examples are dataframe-like, not pandas-only
+
+`Signature(..., examples=...)` accepts tabular examples in any duck-typed
 dataframe-like form, including:
 
 - pandas DataFrame
@@ -108,7 +125,7 @@ dataframe-like form, including:
 ```python
 sig = Signature(
     "question -> answer",
-    data=[{"question": "What is 2+2?", "answer": "4"}],
+    examples=[{"question": "What is 2+2?", "answer": "4"}],
 )
 print(sig.n_examples)
 ```
@@ -343,6 +360,8 @@ from onux import (
     Layer,
     LayerCall,
     Model,
+    Objective,
+    ObjectiveTerm,
     Generate,
     ChainOfThought,
     ReAct,
@@ -364,5 +383,7 @@ from onux import (
 ---
 
 ## License
+
+MIT
 
 MIT

@@ -29,6 +29,8 @@ from onux import (
     LayerCall,
     Map,
     Model,
+    Objective,
+    ObjectiveTerm,
     ReAct,
     Retrieve,
     Signature,
@@ -51,7 +53,8 @@ from onux import (
 ## Signatures
 
 Signature formulas describe field names and flow. Use methods like `.type()`,
-`.note()`, `.via()`, and `.add()` to refine the structure after construction.
+`.note()`, `.examples()`, `.objective()`, `.via()`, and `.add()` to refine
+the structure after construction.
 
 ### `Signature`
 
@@ -435,10 +438,10 @@ question -> answer
   ← answer    str
 ```
 
-### `.with_examples()`
+### `.examples()`
 
 ```python
-print(Signature("question -> answer").with_examples([{"question": "Q", "answer": "A"}]))
+print(Signature("question -> answer").examples([{"question": "Q", "answer": "A"}]))
 ```
 
 ```output:exec-1773708421993-74oz8
@@ -447,6 +450,40 @@ question -> answer
   → question  str
   ← answer    str
   (1 examples)
+```
+
+### `.objective()`
+
+```python
+def exact_match(example, prediction, *, signature=None):
+    return float(example["answer"] == prediction["answer"])
+
+print(Signature("question -> answer").objective(exact_match, "Correct and concise."))
+```
+
+```output
+question -> answer
+  'Given `question`, produce `answer`.'
+  objective:
+    - __main__.exact_match [weight=1]
+    - Correct and concise. [weight=1]
+  → question  str
+  ← answer    str
+```
+
+### `.rubric()`
+
+```python
+print(Signature("question -> answer").rubric("Correct and concise."))
+```
+
+```output
+question -> answer
+  'Given `question`, produce `answer`.'
+  objective:
+    - Correct and concise.
+  → question  str
+  ← answer    str
 ```
 
 ### `.dump_state()` / `.load_state()`
@@ -528,4 +565,6 @@ Compile: {'optimizer': 'auto_prompt', 'meta_lm': 'gpt-4.1'}
 Examples: 1 rows
 Out[49]: 'Model: "model"\nInputs:\n  - question: str\nOutputs:\n  - answer: str (public)\nGraph:\n  - [4] ReAct(trajectory, answer) <- question, module=react\nCompile: {\'optimizer\': \'auto_prompt\', \'meta_lm\': \'gpt-4.1\'}\nExamples: 1 rows'
 ```
+
+`
 

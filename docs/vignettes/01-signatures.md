@@ -33,6 +33,86 @@ question -> answer
   ← answer    str
 ```
 
+## A fuller builder-style signature
+
+In practice, signatures are often built in a few steps: start from the
+formula, then add hint text, field notes, and examples.
+
+```python
+sig = (
+    Signature("question -> answer")
+    .hint("Answer briefly and directly.")
+    .note(
+        question="User question",
+        answer="Short factual answer",
+    )
+    .examples([
+        {"question": "Capital of France?", "answer": "Paris"},
+        {"question": "2+2?", "answer": "4"},
+    ])
+)
+print(sig)
+```
+
+```output
+question -> answer
+  'Answer briefly and directly.'
+  → question  User question: str
+  ← answer    Short factual answer: str
+  (2 examples)
+```
+
+## The same pattern with multiple fields
+
+The same builder style works for multiple inputs, hidden fields, and outputs.
+
+```python
+sig = (
+    Signature("question, context -> reasoning, evidence -> answer, confidence")
+    .hint("Answer briefly, cite the strongest support, and include a confidence score.")
+    .type(context=list[str], evidence=list[str], confidence=float)
+    .note(
+        question="User question",
+        context="Relevant background passages",
+        reasoning="Internal reasoning steps",
+        evidence="Most relevant supporting snippets",
+        answer="Short factual answer",
+        confidence="Confidence score from 0 to 1",
+    )
+    .examples([
+        {
+            "question": "Capital of France?",
+            "context": ["Paris is the capital of France.", "France is in Europe."],
+            "reasoning": "The context explicitly names Paris as the capital.",
+            "evidence": ["Paris is the capital of France."],
+            "answer": "Paris",
+            "confidence": 0.99,
+        },
+        {
+            "question": "2+2?",
+            "context": ["Basic arithmetic: 2 + 2 = 4."],
+            "reasoning": "The arithmetic fact is directly stated.",
+            "evidence": ["Basic arithmetic: 2 + 2 = 4."],
+            "answer": "4",
+            "confidence": 1.0,
+        },
+    ])
+)
+print(sig)
+```
+
+```output
+question, context -> reasoning, evidence -> answer, confidence
+  'Answer briefly, cite the strongest support, and include a confidence score.'
+  → question    User question: str
+  → context     Relevant background passages: list[str]
+  · reasoning   Internal reasoning steps: str
+  · evidence    Most relevant supporting snippets: list[str]
+  ← answer      Short factual answer: str
+  ← confidence  Confidence score from 0 to 1: float
+  (2 examples)
+```
+
 ## Add one hidden field
 
 The formula can include one hidden stage directly, or you can add hidden
@@ -63,9 +143,9 @@ train = pd.DataFrame(
     }
 )
 
-sig = Signature("question -> answer", data=train)
+sig = Signature("question -> answer", examples=train)
 print(sig)
-print(sig.examples)
+print(sig.example_data)
 ```
 
 ```output:exec-1773708492022-vmndn
@@ -146,6 +226,32 @@ question -> answer
   ← answer    str
 ```
 
+## Objectives can mix rubrics and scoring functions
+
+```python
+def exact_match(example, prediction, *, signature=None):
+    return float(example["answer"] == prediction["answer"])
+
+sig3 = Signature("question -> answer").objective(
+    exact_match,
+    "Correct, concise, and grounded in the provided facts.",
+    weights=(0.8, 0.2),
+)
+print(sig3)
+print(sig3.objective_spec)
+```
+
+```output
+question -> answer
+  'Given `question`, produce `answer`.'
+  objective:
+    - __main__.exact_match [weight=0.8]
+    - Correct, concise, and grounded in the provided facts. [weight=0.2]
+  → question  str
+  ← answer    str
+Objective(terms=(ObjectiveTerm(kind='callable', spec=<function exact_match at ...>, weight=0.8, name=None), ObjectiveTerm(kind='rubric', spec='Correct, concise, and grounded in the provided facts.', weight=0.2, name=None)), reduce='weighted_mean')
+```
+
 ## Dot shorthand
 
 ```python
@@ -155,7 +261,7 @@ df = pd.DataFrame({
     "sentiment": ["positive"],
 })
 
-sig4 = Signature(". -> sentiment", data=df)
+sig4 = Signature(". -> sentiment", examples=df)
 print(sig4)
 ```
 
