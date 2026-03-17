@@ -251,43 +251,139 @@ PythonRunner(my_triage_function)
 HTTPRunner("https://internal.example.com/triage/v2", timeout=5.0)
 ```
 
-The runner just does its native thing. It knows nothing about signatures.
+### Runner-internal tools
 
-### Adapter contract
+Modern LMs have built-in capabilities — web search, code interpreter,
+citation, file reading — that are toggled on the runner, not managed
+by a module like `react`. These are runner-level axes:
 
-An adapter bridges between signature fields and a runner's native I/O:
+```python
+# OpenAI: built-in web search and code interpreter
+OpenAILM("gpt-4o", tools=["web_search", "code_interpreter"])
+
+# Anthropic: built-in computer use
+AnthropicLM("claude-3-5-sonnet", tools=["computer_use"])
+
+# Google: built-in grounding with search
+GoogleLM("gemini-1.5-pro", tools=["google_search"])
+```
+
+These are distinct from module-level tools (like `react`'s tool loop).
+Runner-internal tools are features the LM handles natively — the runner
+just toggles them on. Module-level tools are external functions that
+code calls between LM invocations.
+
+A program can use both:
+
+```python
+# Runner has built-in search; module adds a tool loop with external tools
+Program(
+    module=react,
+    runner=OpenAILM("gpt-4o", tools=["web_search"]),
+    tools=[database_lookup, calculator],  # module-level tools
+    max_iter=5,
+)
+```
+
+### Adapter contract: two layers
+
+The adapter problem is that different LM SDKs format the same logical
+content differently. OpenAI, Anthropic, and Google all have different
+message structures for text, images, system prompts, tool calls, and
+tool results. There is a general part (signature → logical structure)
+and a runner-specific part (logical structure → SDK format).
+
+The solution is a two-layer adapter:
 
 ```python
 class Adapter:
-    def encode(self, sig, inputs) -> runner_input
-    def decode(self, sig, output) -> dict
+    def encode(self, sig, inputs) -> CanonicalRequest
+    def decode(self, sig, response: CanonicalResponse) -> dict
 ```
 
-Different runner types need different adapters:
+The adapter works with a **canonical format** — a runner-independent
+representation of the request and response. The runner translates
+between canonical and its SDK's native format internally.
+
+```
+Signature fields → [Adapter: encode] → CanonicalRequest → [Runner: translate] → SDK-native
+SDK-native → [Runner: translate] → CanonicalResponse → [Adapter: decode] → dict
+```
+
+This means:
+
+- **Adapters are runner-independent.** An `XMLAdapter` renders fields
+  into XML-tagged content and parses XML responses. It does not know
+  whether the runner is OpenAI or Anthropic.
+
+- **Runners handle their own SDK quirks.** Each runner translates the
+  canonical request into its SDK's message format: where the system
+  prompt goes, how images are encoded (base64 vs URL vs file upload),
+  how tool calls are structured, what the developer prompt is called,
+  etc.
 
 ```python
-# LM: render fields into a prompt, parse response back
-XMLAdapter()          # XML-tagged prompt format
-JSONAdapter()         # JSON structured output
-ChatAdapter()         # chat messages format
+# Canonical request — runner-independent
+CanonicalRequest(
+    system="You are a triage classifier.",
+    messages=[
+        Message(role="user", content=[
+            TextPart("Classify this request:"),
+            TextPart("I was charged twice for my subscription."),
+        ]),
+    ],
+    output_schema={"severity": Severity, "team": Team, ...},
+)
 
+# OpenAI translates to:
+{"model": "gpt-4o", "messages": [
+    {"role": "system", "content": "You are a triage classifier."},
+    {"role": "user", "content": "Classify this request:\n..."},
+], "response_format": {...}}
+
+# Anthropic translates to:
+{"model": "claude-3-5-sonnet", "system": "You are a triage classifier.",
+ "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "Classify..."}]},
+]}
+
+# Google translates to its own format, etc.
+```
+
+For images:
+
+```python
+# Canonical — runner-independent
+Message(role="user", content=[
+    TextPart("What's in this image?"),
+    ImagePart(data=image_bytes, media_type="image/png"),
+])
+
+# OpenAI translates to: {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+# Anthropic translates to: {"type": "image", "source": {"type": "base64", "data": "...", "media_type": "image/png"}}
+# Google translates to its own format
+```
+
+This keeps adapters reusable across runners while letting each runner
+handle its own SDK's quirks and inconsistencies internally.
+
+For non-LM runners, the adapter often does not need the canonical
+layer — it translates directly:
+
+```python
 # sklearn: extract features, map predictions
 SklearnAdapter(vectorizer=tfidf, label_map=LABELS)
 
 # Vision: load image, format annotations, convert outputs
 SAMAdapter(input_key="image", output_format="masks")
-YOLOAdapter(input_key="image", output_format="boxes")
 
-# HTTP: serialize/deserialize JSON
-HTTPJSONAdapter()
-
-# Trivial: runner already speaks in dicts, no transformation
+# Trivial: runner already speaks in dicts
 PassthroughAdapter()
 ```
 
-For LM runners, adapters can often be **auto-generated** from the
-signature's fields and types. For other runners, adapters are typically
-written by hand or provided by the runner library.
+For LM runners, adapters can be **auto-generated** from the signature's
+fields and types. For other runners, adapters are typically written by
+hand or provided by the runner library.
 
 ### Axes are runner-type-dependent
 
@@ -309,7 +405,7 @@ Program axes are not universal. There are three kinds:
 | `provider` / `sdk` | `device` | `device` |
 | `temperature` | `conf_thresh` | `batch_size` |
 | `max_tokens` | `iou_thresh` | `feature_extractor` |
-| | `points_per_side` | |
+| `internal_tools` | `points_per_side` | |
 
 **Module-specific axes** — each module adds its own parameters:
 
@@ -382,10 +478,11 @@ the optimizer knows what to search over.
 ```python
 >>> OpenAILM.axes()
 {
-    "model":       Axis(type=str, default="gpt-4o", choices=["gpt-4o", "gpt-4o-mini", "gpt-4.1", ...]),
-    "temperature": Axis(type=float, default=1.0, range=(0.0, 2.0)),
-    "max_tokens":  Axis(type=int, default=4096, range=(1, 128000)),
-    "top_p":       Axis(type=float, default=1.0, range=(0.0, 1.0)),
+    "model":          Axis(type=str, default="gpt-4o", choices=["gpt-4o", "gpt-4o-mini", "gpt-4.1", ...]),
+    "temperature":    Axis(type=float, default=1.0, range=(0.0, 2.0)),
+    "max_tokens":     Axis(type=int, default=4096, range=(1, 128000)),
+    "top_p":          Axis(type=float, default=1.0, range=(0.0, 1.0)),
+    "internal_tools": Axis(type=list, default=[], choices=["web_search", "code_interpreter", "file_search"]),
 }
 
 >>> AnthropicLM.axes()
