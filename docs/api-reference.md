@@ -65,7 +65,7 @@ question -> answer
 
 ```python
 field = Field("rating", "output", float, "star rating")
-print(field.name, field.role, field.base_type.__name__, field.note)
+print(field.name, field.role, field.type_.__name__, field.note)
 ```
 
 ```output:exec-1773708257153-ajvqd

@@ -32,6 +32,14 @@ source .venv/bin/activate
 uv sync
 ```
 
+Run docstring doctests with either command:
+
+```bash
+make test-docs
+# or
+uv run python3 -m unittest tests.test_doctests
+```
+
 ---
 
 ## Level 1: Signatures

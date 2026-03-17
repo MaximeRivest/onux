@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import re
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, get_args, get_origin
+from typing import Any, Literal, get_args, get_origin
 
 from .examples import ExamplesTable, infer_type as _infer_type, normalize_examples as _normalize_examples
 
@@ -19,8 +18,7 @@ class Field:
     role : {"input", "hidden", "output"}
         Field role within the signature.
     type_ : type, default=str
-        Python type associated with the field. This may be wrapped in
-        ``typing.Annotated``.
+        Python type associated with the field.
     note : str | None, default=None
         Optional human-readable field note.
 
@@ -31,7 +29,7 @@ class Field:
     'score'
     >>> field.role
     'output'
-    >>> field.base_type is float
+    >>> field.type_ is float
     True
     >>> field.note
     'Normalized score'
@@ -41,45 +39,6 @@ class Field:
     role: Literal["input", "hidden", "output"]
     type_: type = str
     note: str | None = None
-
-    @property
-    def base_type(self) -> type:
-        """Return the underlying field type.
-
-        Returns
-        -------
-        type
-            The field type with any ``typing.Annotated`` wrapper removed.
-
-        Examples
-        --------
-        >>> field = Field("rating", "output", Annotated[int, "0-5 stars"])
-        >>> field.base_type is int
-        True
-        """
-        if get_origin(self.type_) is Annotated:
-            return get_args(self.type_)[0]
-        return self.type_
-
-    @property
-    def annotations(self) -> tuple[Any, ...]:
-        """Return metadata attached through ``typing.Annotated``.
-
-        Returns
-        -------
-        tuple[Any, ...]
-            Annotation metadata for the field type. Returns an empty tuple when
-            the type is not annotated.
-
-        Examples
-        --------
-        >>> field = Field("rating", "output", Annotated[int, "0-5", "stars"])
-        >>> field.annotations
-        ('0-5', 'stars')
-        """
-        if get_origin(self.type_) is Annotated:
-            return get_args(self.type_)[1:]
-        return ()
 
 
 _ROLE_ORDER = {"input": 0, "hidden": 1, "output": 2}
@@ -93,19 +52,20 @@ _BUILTIN_TYPES: dict[str, type] = {
     "tuple": tuple,
     "set": set,
 }
-_ENUM_RE = re.compile(r"^\{([^}]+)\}$")
 
 
 class Signature:
     """Declarative input/output contract for one semantic task.
 
-    A signature is defined by a compact pipeline formula:
+    A signature is defined by a compact pipeline formula containing field
+    names only:
 
     - ``inputs -> outputs``
     - ``inputs -> hidden -> outputs``
 
-    At most two arrows are allowed. Use :meth:`via` to insert additional hidden
-    fields after construction.
+    At most two arrows are allowed. Build the formula from field names, then
+    refine the signature with methods such as :meth:`type`, :meth:`via`, and
+    :meth:`add`.
 
     Examples
     --------
@@ -115,17 +75,23 @@ class Signature:
     >>> basic.formula
     'question -> answer'
 
-    Add an explicit hidden reasoning field:
+    Add types after construction with :meth:`type`:
 
-    >>> hidden = Signature("question -> reasoning -> answer")
-    >>> list(hidden.hidden_fields)
-    ['reasoning']
+    >>> typed = Signature("question -> answer").type(answer=float)
+    >>> typed.output_fields["answer"].type_ is float
+    True
 
-    Add type information directly in the formula:
+    Add an explicit hidden reasoning field with :meth:`via`:
 
-    >>> typed = Signature("question:str -> label:{yes, no}")
-    >>> get_args(typed.output_fields["label"].type_)
-    ('yes', 'no')
+    >>> hidden = Signature("question -> answer").via("reasoning", type_=str)
+    >>> hidden.formula
+    'question -> reasoning -> answer'
+
+    Add more outputs with commas in the formula or with :meth:`add`:
+
+    >>> multi = Signature("question, context -> answer").add("confidence", float)
+    >>> list(multi.output_fields)
+    ['answer', 'confidence']
 
     Infer types from example data and expand inputs with ``.`` shorthand:
 
@@ -143,7 +109,6 @@ class Signature:
         *,
         data: Any | None = None,
         hint: str | None = None,
-        types: dict[str, type] | None = None,
         _fields: tuple[Field, ...] | None = None,
         _examples: ExamplesTable | None = None,
     ):
@@ -152,16 +117,14 @@ class Signature:
         Parameters
         ----------
         formula : str | None, optional
-            Formula describing the task, such as ``"question -> answer"``.
+            Formula describing the task as comma-separated field names, such as
+            ``"question -> answer"`` or ``"question -> reasoning -> answer"``.
         data : Any | None, optional
             Tabular example data or an iterable of record mappings used to
             infer field types and attach examples.
         hint : str | None, optional
             Human-readable task guidance. When omitted, a default hint is
             derived from input and output field names.
-        types : dict[str, type] | None, optional
-            Custom type aliases keyed by the type names used inside the
-            formula.
         _fields : tuple[Field, ...] | None, optional
             Internal field tuple used when cloning an existing signature.
         _examples : ExamplesTable | None, optional
@@ -187,18 +150,41 @@ class Signature:
         >>> guided.dump_state()["hint"]
         'Answer in one sentence.'
 
-        Register a custom type alias and use it in the formula:
+        Keep the formula limited to names and add types afterward:
 
-        >>> typed = Signature("question -> answer:Score", types={"Score": float})
-        >>> typed.output_fields["answer"].base_type is float
+        >>> typed = Signature("question -> answer").type(question=str, answer=float)
+        >>> typed.input_fields["question"].type_ is str
+        True
+        >>> typed.output_fields["answer"].type_ is float
         True
 
-        Mix formula types and example-driven inference:
+        Add typed hidden and output fields with :meth:`via` and :meth:`add`:
+
+        >>> richer = Signature("question -> answer").via("reasoning", type_=list[str]).add("confidence", float)
+        >>> richer.hidden_fields["reasoning"].type_
+        list[str]
+        >>> richer.output_fields["confidence"].type_ is float
+        True
+
+        Infer types from examples when you do not want to call :meth:`type`:
 
         >>> rows = [{"question": "How many legs does a spider have?", "confidence": 0.9}]
         >>> inferred = Signature("question -> confidence", data=rows)
-        >>> inferred.output_fields["confidence"].base_type is float
+        >>> inferred.output_fields["confidence"].type_ is float
         True
+
+        Combine structure, notes, and types progressively:
+
+        >>> rich = (
+        ...     Signature("question -> answer")
+        ...     .via("reasoning", note="Intermediate reasoning")
+        ...     .add("confidence", float, note="0 to 1")
+        ...     .type(answer=str)
+        ... )
+        >>> rich.formula
+        'question -> reasoning -> answer, confidence'
+        >>> rich.output_fields["confidence"].note
+        '0 to 1'
         """
         if _fields is not None:
             object.__setattr__(self, "_fields", _fields)
@@ -210,7 +196,7 @@ class Signature:
             raise ValueError("Provide a formula like 'question -> answer'.")
 
         examples = _normalize_examples(data)
-        fields = _parse_formula(formula, examples, types)
+        fields = _parse_formula(formula, examples)
 
         object.__setattr__(self, "_fields", fields)
         object.__setattr__(self, "_examples", examples)
@@ -397,6 +383,9 @@ class Signature:
     def type(self, **types: type) -> Signature:
         """Return a copy with updated field types.
 
+        Use this method to assign or update field types while keeping the
+        formula focused on field names and structure.
+
         Parameters
         ----------
         **types : type
@@ -409,10 +398,23 @@ class Signature:
 
         Examples
         --------
+        Start with an untyped formula and set one field type:
+
         >>> sig = Signature("question -> answer").type(answer=float)
-        >>> sig.output_fields["answer"].base_type is float
+        >>> sig.output_fields["answer"].type_ is float
         True
-        >>> Signature("question -> answer").output_fields["answer"].base_type is str
+
+        Update several fields at once:
+
+        >>> scored = Signature("question, context -> answer, confidence").type(context=list[str], confidence=float)
+        >>> scored.input_fields["context"].type_
+        list[str]
+        >>> scored.output_fields["confidence"].type_ is float
+        True
+
+        The original signature remains unchanged:
+
+        >>> Signature("question -> answer").output_fields["answer"].type_ is str
         True
         """
         new_fields = tuple(
@@ -443,6 +445,11 @@ class Signature:
         -------
         Signature
             A new signature with the hidden field inserted before outputs.
+
+        Notes
+        -----
+        This method is useful for introducing intermediate hidden fields while
+        keeping the main formula focused on the task structure.
 
         Examples
         --------
@@ -492,12 +499,17 @@ class Signature:
         Signature
             A new signature with the extra output field.
 
+        Notes
+        -----
+        This method is useful for extending an existing signature with
+        additional outputs after the initial task structure is in place.
+
         Examples
         --------
         >>> sig = Signature("question -> answer").add("confidence", float, note="0 to 1")
         >>> sig.formula
         'question -> answer, confidence'
-        >>> sig.output_fields["confidence"].base_type is float
+        >>> sig.output_fields["confidence"].type_ is float
         True
         >>> sig.output_fields["confidence"].note
         '0 to 1'
@@ -594,7 +606,7 @@ class Signature:
                 {
                     "name": field.name,
                     "role": field.role,
-                    "type": field.base_type.__name__,
+                    "type": _type_name(field.type_),
                     "note": field.note,
                 }
                 for field in self._fields
@@ -645,10 +657,6 @@ class Signature:
             if origin is Literal:
                 return "one of: " + ", ".join(repr(v) for v in get_args(tp))
 
-            if origin is Annotated:
-                base, *_ = get_args(tp)
-                return format_type(base)
-
             if origin is not None:
                 args = get_args(tp)
                 name = getattr(origin, "__name__", str(origin))
@@ -684,18 +692,30 @@ class Signature:
 __all__ = ["Field", "Signature"]
 
 
+def _type_name(tp: Any) -> str:
+    origin = get_origin(tp)
+    if origin is not None:
+        return getattr(origin, "__name__", str(origin))
+    if isinstance(tp, type):
+        return tp.__name__
+    return str(tp)
+
+
 def _parse_formula(
     formula: str,
     data: ExamplesTable | None = None,
-    custom_types: dict[str, type] | None = None,
 ) -> tuple[Field, ...]:
     groups = [group.strip() for group in formula.split("->")]
     if len(groups) < 2:
-        raise ValueError(f"Formula {formula!r} must contain at least one '->'.")
+        raise ValueError(
+            f"Invalid signature formula {formula!r}. "
+            "Use 'input1, input2 -> output1, output2' or 'input1 -> hidden1, hidden2 -> output1'."
+        )
     if len(groups) > 3:
         raise ValueError(
-            f"Formula {formula!r} has {len(groups) - 1} arrows. "
-            "At most two '->' allowed (inputs -> hidden -> outputs). Use .via() for additional hidden stages."
+            f"Invalid signature formula {formula!r}. "
+            "Use at most two '->': 'input1, input2 -> output1, output2' or "
+            "'input1 -> hidden1, hidden2 -> output1'."
         )
 
     input_group = groups[0]
@@ -703,80 +723,56 @@ def _parse_formula(
     output_group = groups[-1]
 
     fields: list[Field] = []
-    for name, type_ in _parse_field_list(input_group, custom_types):
-        fields.append(Field(name, "input", type_ or _infer_type(data, name)))
+    for name in _parse_field_list(input_group):
+        fields.append(Field(name, "input", _infer_type(data, name)))
 
     if len(fields) == 1 and fields[0].name == ".":
         if data is None:
             raise ValueError("Dot shorthand '.' requires dataframe-like example data.")
         excluded = set()
         for group in (hidden_group, output_group):
-            for name, _ in _parse_field_list(group, custom_types):
+            for name in _parse_field_list(group):
                 excluded.add(name)
         fields = [Field(column, "input", _infer_type(data, column)) for column in data.columns if column not in excluded]
 
     if hidden_group:
-        for name, type_ in _parse_field_list(hidden_group, custom_types):
-            fields.append(Field(name, "hidden", type_ or _infer_type(data, name)))
+        for name in _parse_field_list(hidden_group):
+            fields.append(Field(name, "hidden", _infer_type(data, name)))
 
-    for name, type_ in _parse_field_list(output_group, custom_types):
-        fields.append(Field(name, "output", type_ or _infer_type(data, name)))
+    for name in _parse_field_list(output_group):
+        fields.append(Field(name, "output", _infer_type(data, name)))
 
     return tuple(fields)
 
 
 
-def _parse_field_list(s: str, custom_types: dict[str, type] | None = None) -> list[tuple[str, type | None]]:
+def _parse_field_list(s: str) -> list[str]:
     if not s:
         return []
-    parts: list[str] = []
-    depth = 0
-    current: list[str] = []
-    for ch in s:
-        if ch in "[{":
-            depth += 1
-        elif ch in "]}":
-            depth -= 1
-        if ch == "," and depth == 0:
-            parts.append("".join(current))
-            current = []
-        else:
-            current.append(ch)
-    parts.append("".join(current))
 
-    fields: list[tuple[str, type | None]] = []
-    for part in parts:
+    fields: list[str] = []
+    for part in s.split(","):
         part = part.strip()
         if not part:
             continue
-        if ":" in part:
-            name, type_str = part.split(":", 1)
-            fields.append((name.strip(), _resolve_type_str(type_str.strip(), custom_types)))
-        else:
-            fields.append((part, None))
+        if not _is_valid_field_name(part):
+            raise ValueError(
+                f"Invalid field entry {part!r}. "
+                "Signature formulas accept field names only, for example 'question, context -> answer' or "
+                "'question -> reasoning -> answer'. To set types, use .type(answer=float); "
+                "to add typed hidden/output fields, use .via('reasoning', type_=str) or "
+                ".add('confidence', float); or provide example data for inference."
+            )
+        fields.append(part)
     return fields
 
 
 
-def _resolve_type_str(s: str, custom_types: dict[str, type] | None = None) -> type:
-    match = _ENUM_RE.match(s)
-    if match:
-        values = tuple(v.strip() for v in match.group(1).split(","))
-        return Literal[values]  # type: ignore[valid-type]
-
-    if "[" in s and "]" in s and ":" in s:
-        raise ValueError(
-            "Type constraints like 'float[0:1]' are no longer supported. "
-            "Use plain types and reflect constraints in your optimizer metric instead."
-        )
-
-    return _resolve_simple_type(s, custom_types)
-
-
-
-def _resolve_simple_type(name: str, custom_types: dict[str, type] | None = None) -> type:
-    if custom_types and name in custom_types:
-        return custom_types[name]
-    if name in _BUILTIN_TYPES:
-        return _BUILTIN_TYPES[name]
-    raise ValueError(f"Unknown type {name!r}.")
+def _is_valid_field_name(name: str) -> bool:
+    if name == ".":
+        return True
+    if not name:
+        return False
+    if not (name[0].isalpha() or name[0] == "_"):
+        return False
+    return all(ch.isalnum() or ch == "_" for ch in name)
