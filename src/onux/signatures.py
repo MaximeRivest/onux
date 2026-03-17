@@ -177,6 +177,15 @@ class ExamplesTable:
         raw = self.raw
         if hasattr(raw, "height"):
             return int(raw.height)
+        if hasattr(raw, "num_rows") and raw.num_rows is not None:
+            return int(raw.num_rows)
+        if hasattr(raw, "count"):
+            try:
+                count = raw.count()
+                if isinstance(count, int):
+                    return count
+            except Exception:  # noqa: BLE001
+                pass
         try:
             return len(raw)
         except TypeError:
@@ -201,6 +210,8 @@ class ExamplesTable:
 
         if hasattr(raw, "to_dicts"):
             records = raw.to_dicts()
+        elif hasattr(raw, "to_pylist"):
+            records = raw.to_pylist()
         elif hasattr(raw, "to_dict"):
             try:
                 records = raw.to_dict("records")
@@ -220,24 +231,37 @@ class ExamplesTable:
                 records = table.to_pylist()
             else:
                 raise TypeError("Unsupported tabular object: .to_arrow() result cannot be converted to records.")
+        elif hasattr(raw, "toLocalIterator"):
+            records = list(raw.toLocalIterator())
+        elif hasattr(raw, "collect") and hasattr(raw, "dtypes"):
+            records = raw.collect()
         elif hasattr(raw, "df"):
             df = raw.df()
             if hasattr(df, "to_dict"):
                 records = df.to_dict("records")
             else:
                 raise TypeError("Unsupported tabular object: .df() result cannot be converted to records.")
+        elif hasattr(raw, "dtype") and getattr(raw.dtype, "names", None):
+            records = []
+            names = list(raw.dtype.names)
+            for row in raw:
+                records.append({name: row[name].item() if hasattr(row[name], "item") else row[name] for name in names})
         elif isinstance(raw, Iterable):
             records = list(raw)
         else:
             raise TypeError(
-                "Examples must be dataframe-like (pandas/polars/duckdb-style) or an iterable of dict records."
+                "Examples must be dataframe-like (pandas/polars/duckdb/arrow/pyspark/numpy-structured) or an iterable of dict records."
             )
 
         normalized: list[dict[str, Any]] = []
         for record in records:
-            if not isinstance(record, Mapping):
-                raise TypeError("Example rows must be mapping-like records.")
-            normalized.append(dict(record))
+            if isinstance(record, Mapping):
+                normalized.append(dict(record))
+                continue
+            if hasattr(record, "asDict"):
+                normalized.append(dict(record.asDict(recursive=True)))
+                continue
+            raise TypeError("Example rows must be mapping-like records.")
         return normalized
 
 
@@ -575,7 +599,16 @@ def _infer_type_from_schema(raw: Any, name: str) -> type | None:
         except Exception:  # noqa: BLE001
             pass
 
-    # polars-like: schema is a mapping from column -> dtype
+    # numpy structured arrays / recarrays
+    if hasattr(raw, "dtype") and getattr(raw.dtype, "names", None) and name in raw.dtype.names:
+        try:
+            inferred = _infer_type_from_dtype_name(str(raw.dtype[name]))
+            if inferred is not None:
+                return inferred
+        except Exception:  # noqa: BLE001
+            pass
+
+    # polars-like / arrow-like / spark-like schema objects
     if hasattr(raw, "schema"):
         schema = raw.schema
         if isinstance(schema, Mapping) and name in schema:
@@ -589,6 +622,28 @@ def _infer_type_from_schema(raw: Any, name: str) -> type | None:
                     return inferred
             except Exception:  # noqa: BLE001
                 pass
+        if hasattr(schema, "__iter__"):
+            try:
+                for field in schema:
+                    field_name = getattr(field, "name", None)
+                    if field_name == name:
+                        dtype = getattr(field, "dataType", None) or getattr(field, "type", None)
+                        inferred = _infer_type_from_dtype_name(str(dtype))
+                        if inferred is not None:
+                            return inferred
+            except Exception:  # noqa: BLE001
+                pass
+
+    # pyspark-like: dtypes is a list of (name, type)
+    if hasattr(raw, "dtypes"):
+        try:
+            for column, dtype in raw.dtypes:
+                if column == name:
+                    inferred = _infer_type_from_dtype_name(str(dtype))
+                    if inferred is not None:
+                        return inferred
+        except Exception:  # noqa: BLE001
+            pass
 
     # duckdb-like: relation.columns + relation.types
     if hasattr(raw, "columns") and hasattr(raw, "types"):
@@ -606,17 +661,21 @@ def _infer_type_from_schema(raw: Any, name: str) -> type | None:
 
 def _infer_type_from_dtype_name(dtype_name: str) -> type | None:
     text = dtype_name.upper()
-    if any(token in text for token in ("DOUBLE", "FLOAT", "DECIMAL", "NUMERIC")):
+    if any(token in text for token in ("DOUBLE", "FLOAT", "DECIMAL", "NUMERIC", "FLOAT16", "FLOAT32", "FLOAT64")):
         return float
-    if any(token in text for token in ("INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "UBIGINT", "UINTEGER")):
+    if any(token in text for token in (
+        "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "UBIGINT", "UINTEGER",
+        "INT8", "INT16", "INT32", "INT64", "UINT8", "UINT16", "UINT32", "UINT64",
+        "LONG", "SHORT", "BYTE",
+    )):
         return int
-    if "BOOL" in text:
+    if any(token in text for token in ("BOOL", "BOOLEAN")):
         return bool
     if any(token in text for token in ("LIST", "ARRAY")):
         return list
-    if any(token in text for token in ("STRUCT", "MAP", "DICT")):
+    if any(token in text for token in ("STRUCT", "MAP", "DICT", "OBJECT")):
         return dict
-    if any(token in text for token in ("STR", "TEXT", "VARCHAR", "UTF8", "STRING")):
+    if any(token in text for token in ("STR", "TEXT", "VARCHAR", "UTF8", "STRING", "UNICODE")):
         return str
     return None
 

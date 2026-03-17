@@ -85,6 +85,9 @@ dataframe-like form, including:
 - pandas DataFrame
 - polars DataFrame
 - duckdb relation
+- pyarrow Table / RecordBatch
+- pyspark DataFrame
+- numpy structured array / recarray
 - list / iterable of dict records
 
 ```python
