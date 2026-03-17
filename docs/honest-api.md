@@ -213,25 +213,112 @@ Both fulfill the same contract:
 (sig, inputs) -> dict
 ```
 
-### Axes of a program
+### Runner contract
 
-A program is not "general" or "specific" as a whole. It is a collection
-of independent axes, each of which can be configured separately:
+A runner is anything that takes an input and produces an output in its
+own native format:
 
-| Axis | What it controls | Example values |
+```python
+class Runner:
+    def run(self, input) -> output
+```
+
+Different runner types have completely different native I/O and their
+own parameters:
+
+```python
+# LM runners — different SDKs, same concept
+OpenAILM("gpt-4o", temperature=0.0)
+OpenAILM("ft:gpt-4o:triage-v3")          # finetuned
+AnthropicLM("claude-3-5-sonnet", temperature=0.3)
+LiteLLM("gpt-4o", provider="azure")      # same model, different provider
+PydanticAIRunner("gpt-4o")               # different SDK
+LangChainLLM("gpt-4o")                   # another SDK
+
+# Vision runners
+SAMRunner(checkpoint="sam_vit_h.pth", points_per_side=32, pred_iou_thresh=0.88)
+YOLORunner(weights="yolov8x.pt", conf_thresh=0.25, iou_thresh=0.45)
+DINOv2Runner(model="dinov2_vitl14", device="cuda")
+
+# ML runners
+SklearnRunner("triage_classifier.joblib")
+TorchRunner("model.pt", device="cuda", batch_size=32)
+ONNXRunner("model.onnx")
+
+# Code runners
+RegexRunner(r"severity:\s*(low|medium|high|critical)")
+PythonRunner(my_triage_function)
+HTTPRunner("https://internal.example.com/triage/v2", timeout=5.0)
+```
+
+The runner just does its native thing. It knows nothing about signatures.
+
+### Adapter contract
+
+An adapter bridges between signature fields and a runner's native I/O:
+
+```python
+class Adapter:
+    def encode(self, sig, inputs) -> runner_input
+    def decode(self, sig, output) -> dict
+```
+
+Different runner types need different adapters:
+
+```python
+# LM: render fields into a prompt, parse response back
+XMLAdapter()          # XML-tagged prompt format
+JSONAdapter()         # JSON structured output
+ChatAdapter()         # chat messages format
+
+# sklearn: extract features, map predictions
+SklearnAdapter(vectorizer=tfidf, label_map=LABELS)
+
+# Vision: load image, format annotations, convert outputs
+SAMAdapter(input_key="image", output_format="masks")
+YOLOAdapter(input_key="image", output_format="boxes")
+
+# HTTP: serialize/deserialize JSON
+HTTPJSONAdapter()
+
+# Trivial: runner already speaks in dicts, no transformation
+PassthroughAdapter()
+```
+
+For LM runners, adapters can often be **auto-generated** from the
+signature's fields and types. For other runners, adapters are typically
+written by hand or provided by the runner library.
+
+### Axes are runner-type-dependent
+
+Program axes are not universal. There are three kinds:
+
+**Shared axes** — apply to all programs regardless of runner:
+
+| Axis | What it controls |
+|---|---|
+| `module` | Strategy pattern |
+| `runner` | What executes |
+| `adapter` | Encode/decode bridge |
+
+**Runner-specific axes** — each runner type has its own parameters:
+
+| LM axes | Vision axes | ML axes |
 |---|---|---|
-| `module` | Strategy pattern | `predict`, `chain_of_thought`, `react`, `refine` |
-| `runner` | What executes | `LM("gpt-4o")`, `SklearnModel(...)`, `Regex(...)` |
-| `runner.model` | Specific model | `"gpt-4o"`, `"ft:gpt-4o:triage-v3"`, `"claude-3-5-sonnet"` |
-| `runner.provider` | API / SDK | `"openai"`, `"azure"`, `"anyscale"`, `"vllm"` |
-| `runner.temperature` | Sampling temperature | `0.0`, `0.3`, `0.7` |
-| `adapter` | How to render/parse | `XMLAdapter`, `JSONAdapter`, `auto` |
-| `via` | Hidden fields | `[("reasoning",)]`, `[("plan",), ("evidence",)]` |
-| `hint` | Task-level prompt text | `"Think step by step."` |
-| `notes` | Per-field prompt text | `{"answer": "One sentence."}` |
-| `max_retries` | Retry count (refine) | `1`, `3`, `5` |
-| `tools` | Tool list (react) | `[search, calculator]` |
-| `n` | Vote count (ensemble) | `3`, `5`, `7` |
+| `model` | `checkpoint` / `weights` | `model_path` |
+| `provider` / `sdk` | `device` | `device` |
+| `temperature` | `conf_thresh` | `batch_size` |
+| `max_tokens` | `iou_thresh` | `feature_extractor` |
+| | `points_per_side` | |
+
+**Module-specific axes** — each module adds its own parameters:
+
+| LM module axes | Vision module axes | Universal module axes |
+|---|---|---|
+| `hint` | `scales` (multi_scale) | `max_retries` (refine) |
+| `notes` | `tile_size` (tile_and_merge) | `n` (ensemble) |
+| `via` fields | `augmentations` (TTA) | `check` (refine) |
+| `tools` (react) | `prompt_points` (SAM) | `timeout` (fallback) |
 
 ### Per-axis search control
 
@@ -242,50 +329,29 @@ Each axis can be independently:
 - **Bounded** — a defined search space: a list of options, a range,
   or a constraint.
 
+**Use case: compare LM SDKs and providers.** Same model, different
+backends, to evaluate latency, quantization, and cost.
+
 ```python
 seed = Program(
     module=chain_of_thought,
-    runner=LM("gpt-4o", temperature=0.0),
+    runner=OpenAILM("gpt-4o", temperature=0.0),
     adapter=XMLAdapter(),
-    hint="Read the support request carefully. Consider what the customer "
-         "is experiencing and which team can resolve it.",
+    hint="Read the support request carefully.",
 )
-```
 
-The seed is the starting point. The search space says which axes the
-optimizer can change and what it can change them to:
-
-```python
-# Keep the adapter and module fixed, search over everything else
 results = optimizer.search(
     intent=triage,
     seed=seed,
     space={
-        # Search over these specific models
-        "runner.model": ["gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet"],
-
-        # Search within a range
-        "runner.temperature": (0.0, 1.0),
-
-        # Let the optimizer generate freely
-        "hint": Open(),
-        "via": Open(),
+        "runner": [
+            OpenAILM("gpt-4o"),
+            LiteLLM("gpt-4o", provider="azure"),
+            LiteLLM("gpt-4o", provider="anyscale"),
+            LiteLLM("gpt-4o", provider="fireworks"),
+        ],
     },
-    pin=["adapter", "module"],
-)
-```
-
-**Use case: compare providers.** Same model, different SDKs/providers,
-to evaluate quantization, latency, and cost differences.
-
-```python
-results = optimizer.search(
-    intent=triage,
-    seed=seed,
-    space={
-        "runner.provider": ["openai", "azure", "anyscale", "fireworks"],
-    },
-    pin=["runner.model", "adapter", "module", "hint", "via"],
+    pin=["adapter", "module", "hint", "via"],
 )
 ```
 
@@ -297,18 +363,57 @@ results = optimizer.search(
     intent=triage,
     seed=seed,
     space={
-        "runner.model": [
-            "gpt-4o-mini", "gpt-4o", "gpt-4.1",
-            "claude-3-5-sonnet", "claude-3-5-haiku",
-            "ft:gpt-4o:triage-v3",
+        "runner": [
+            OpenAILM("gpt-4o-mini"), OpenAILM("gpt-4o"),
+            AnthropicLM("claude-3-5-haiku"), AnthropicLM("claude-3-5-sonnet"),
+            OpenAILM("ft:gpt-4o:triage-v3"),
         ],
     },
     pin=["adapter", "module", "hint", "via"],
 )
 ```
 
-**Use case: search everything.** No seed, no pins. The optimizer starts
-from scratch and explores all axes.
+**Use case: LM vs sklearn vs finetuned.** Completely different runner
+types for the same intent.
+
+```python
+results = optimizer.search(
+    intent=triage,
+    space={
+        "program": [
+            Program(module=chain_of_thought, runner=OpenAILM("gpt-4o")),
+            Program(module=predict, runner=OpenAILM("ft:gpt-4o:triage-v3")),
+            Program(module=predict, runner=SklearnRunner("triage_v3.joblib")),
+        ],
+    },
+)
+```
+
+**Use case: vision — find the best YOLO config.** Search over
+runner-specific axes.
+
+```python
+seg_intent = Signature(
+    "image -> boxes, labels, scores",
+    examples=[...],
+    objective=mean_average_precision,
+)
+
+results = optimizer.search(
+    intent=seg_intent,
+    seed=Program(
+        module=predict,
+        runner=YOLORunner(weights="yolov8x.pt", conf_thresh=0.25),
+    ),
+    space={
+        "runner.conf_thresh": (0.1, 0.9),
+        "runner.iou_thresh": (0.3, 0.7),
+        "runner.weights": ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolov8x.pt"],
+    },
+)
+```
+
+**Use case: search everything.** No seed, no pins.
 
 ```python
 results = optimizer.search(intent=triage)
@@ -319,20 +424,53 @@ every axis has a specific value, and it can be executed and reproduced.
 
 ### Modules: strategy patterns
 
-A module defines the execution shape. Built-in modules include:
+A module defines the execution shape: what control flow wraps the runner,
+what transformations happen around it. Some modules are universal, some
+are domain-specific.
 
-- **predict** — single runner call, no hidden fields
+**Universal modules** — work with any runner type:
+
+- **predict** — single runner call
+- **ensemble** — run N programs, vote on results
+- **fallback** — try one program, fall back on failure
+- **refine** — validate output, retry on failure
+- **cascade** — fast/cheap runner first, expensive runner only if needed
+
+**LM-specific modules:**
+
 - **chain_of_thought** — adds `.via("reasoning")`, then predicts
-- **react** — adds reasoning, enters a tool loop
-- **refine** — wraps another program in a validation-retry loop
-- **ensemble** — runs multiple programs, votes on the result
-- **fallback** — tries one program, falls back to another on failure
+- **react** — adds reasoning, enters a tool-calling loop
 - **code_exec** — generates code, runs it, fixes errors in a loop
+- **self_consistency** — sample N reasoning paths, vote on final answer
 
-The module is independent of the runner type. `predict` works with an LM,
-an sklearn model, a regex, or a custom Python function. `ensemble` works
-with any combination of inner programs — one could be an LM, another a
-finetuned model, another a rule-based classifier.
+**Vision-specific modules:**
+
+- **tile_and_merge** — tile a large image, run on each tile, merge
+  results (useful for SAM, YOLO on high-res images)
+- **multi_scale** — run at multiple resolutions, aggregate detections
+  (YOLO, DINOv2)
+- **test_time_augmentation** — run with flips/rotations/crops, merge
+  predictions (any vision model)
+- **prompt_ensemble** — try different point/box prompts, merge masks
+  (SAM-specific)
+
+**ML-specific modules:**
+
+- **calibrate** — predict, then calibrate probabilities
+- **stacking** — multiple models feed a meta-model
+
+**Audio-specific modules:**
+
+- **chunk_and_transcribe** — split audio into segments, transcribe each,
+  merge (Whisper)
+
+The framework provides universal modules and LM modules as built-ins.
+Domain-specific modules are written by users or communities — a module
+is just a function with the contract `(sig, inputs) -> dict`.
+
+The pattern is always the same: a module wraps one or more runner calls
+in a control flow strategy. What varies is which domain the strategy
+serves.
 
 ### Programs: concrete or seed
 
@@ -485,21 +623,29 @@ can:
 
 ### The strategy spectrum
 
-Module strategies range from simple to exotic:
+Module strategies range from simple to exotic, across all domains:
 
-**Pure generation**: augment the signature with hidden fields, then
-predict. Chain-of-thought is here — it just adds `.via("reasoning")`.
+**Single call**: one runner call, no extra logic. `predict` is here —
+it works with any runner type.
 
-**Pure procedural**: wrap a runner in control flow without changing the
-signature. Ensemble (majority voting), fallback, and refine are here.
+**Input transformation**: modify or augment the input before calling the
+runner. LM: `chain_of_thought` (adds reasoning field). Vision:
+`multi_scale` (resize to multiple resolutions). Audio:
+`chunk_and_transcribe` (split into segments).
 
-**Mixed**: augment the signature AND run code between runner calls. ReAct
-(tool loop) and code_exec (generate-lint-fix loop) are here.
+**Output aggregation**: run multiple times, aggregate results. `ensemble`
+and `test_time_augmentation` are here — both universal patterns applied
+to different domains.
 
-**Exotic**: deeply interleave code with runner execution. Streaming token
-detection, assistant prefill manipulation, multi-model orchestration.
+**Validation loop**: run, check, retry. `refine` is here — works with
+any runner.
 
-The spectrum is smooth. At every level, the contract is the same:
+**Interleaved code**: run code between runner calls. LM: `react` (tool
+loop), `code_exec` (generate-lint-fix). Vision: `tile_and_merge` (run
+per tile, stitch results). ML: `cascade` (fast model filters, detailed
+model refines).
+
+The spectrum is smooth, and the contract is always the same:
 `(sig, inputs) -> dict`.
 
 ---
@@ -692,12 +838,11 @@ based on which module you use. So it belongs on the Signature:
 | Examples | Signature | Behavioral specification |
 | Rubrics and metrics | Signature | Scoring criteria — define success |
 | Reference artifacts | Signature | Behavioral anchor |
-| Strategy pattern | Module | Execution shape — control flow, decomposition |
-| Runner, model, provider | Program (axis) | Pinned, seeded, or bounded search space |
-| Adapter | Program (axis) | Pinned, seeded, or auto-generated |
-| Hint text, field notes | Program (axis) | Pinned, seeded, or optimizer-generated |
-| Hidden fields | Program (axis) | Module default, seeded, or optimizer-searched |
-| Control flow params | Program (axis) | Temperature, retries, tools, etc. |
+| Strategy pattern | Module | Universal, LM-specific, or domain-specific |
+| Runner | Program (axis) | LM, vision, ML, code, HTTP — each with own params |
+| Adapter | Program (axis) | Bridges signature fields to runner's native I/O |
+| Runner-specific params | Program (axis) | Temperature, conf_thresh, device, etc. |
+| Module-specific params | Program (axis) | Hint, via, tools, scales, tile_size, etc. |
 | Multi-step data flow | Graph (Layer, Model) | Composition of modules |
 | Runtime telemetry | `runtime` parameter | Not a task field |
 
@@ -705,14 +850,15 @@ The honest truth is:
 
 - **A Signature says WHAT to produce.** Inputs, outputs, types, examples,
   objective. It is the behavioral target the optimizer holds fixed.
-- **A module defines the strategy pattern.** Chain-of-thought, ReAct,
-  ensemble, refine — these are execution shapes. They define control
-  flow and decomposition without pinning down specific parameters.
-- **A program specifies values for a module's axes.** Each axis (runner,
-  model, provider, adapter, hint, via fields, temperature, etc.) is
-  independently pinned, seeded, or bounded to a search space. A program
-  can be executed directly or handed to an optimizer as a seed. A
-  checkpoint is a fully concrete program.
+- **A module defines the strategy pattern.** Some are universal (predict,
+  ensemble, refine, fallback). Some are LM-specific (chain_of_thought,
+  react). Some are domain-specific (tile_and_merge, multi_scale, TTA).
+  They define control flow without pinning down parameters.
+- **A program specifies values for a module's axes.** Axes are
+  runner-type-dependent (LM: temperature, provider; vision: conf_thresh,
+  iou_thresh; ML: model_path, device) and module-dependent (hint, via,
+  tools, scales). Each axis is independently pinned, seeded, or bounded.
+  A checkpoint is a fully concrete program.
 - **A graph wires multiple modules together.** Each node has a signature
   and a module. The graph handles data flow.
 - **The optimizer test keeps the boundary clean.** If an optimizer would
