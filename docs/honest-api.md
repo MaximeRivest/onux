@@ -213,27 +213,61 @@ Both fulfill the same contract:
 (sig, inputs) -> dict
 ```
 
-### Every axis is independently general or specific
+### Every axis is independently open, seeded, or pinned
 
-A program is not "general" or "specific" as a whole. Each axis can be
-pinned independently:
+A program is not "general" or "specific" as a whole. Each axis has one
+of three states:
 
-| Axis | General | Specific |
-|---|---|---|
-| Runner | "any LM" | `LM("gpt-4o", temperature=0.0)` |
-| Runner (more specific) | `LM("gpt-4o")` | `LM("ft:gpt-4o:triage-v3")` |
-| Adapter | auto-generate | hand-written prompt template |
-| Via fields | "add some reasoning" | these exact fields with these notes |
-| Hint | "generate appropriate" | this exact text |
-| Control flow | "some retry strategy" | refine with this validator, max 3 |
+- **Open** — no initial value. The optimizer searches freely.
+- **Seeded** — an initial value as a starting point. The optimizer can
+  explore from it.
+- **Pinned** — a fixed value. The optimizer does not touch it.
 
-A real program might pin the runner but leave hints open for the optimizer.
-Or use a specific finetuned model but auto-generate the adapter. Or fix
-the via fields but search over LMs. The axes are independent.
+| Axis | Open | Seeded | Pinned |
+|---|---|---|---|
+| Runner | "find a runner" | start with `LM("gpt-4o")` | must be `LM("ft:gpt-4o:triage-v3")` |
+| Adapter | auto-generate | start with this template | must use this template |
+| Via fields | "find a decomposition" | start with `[("reasoning",)]` | must use exactly these |
+| Hint | "generate one" | start with this text | must use this text |
+| Temperature | "find a value" | start with 0.3 | must be 0.0 |
 
-This means the optimizer can search over any combination of open axes
-while holding the pinned axes fixed. A "checkpoint" is a program where
-every axis is pinned — it is fully reproducible.
+A program handed to an optimizer is naturally a seed — every value is a
+starting point, and the optimizer explores from there. The user then
+selectively pins axes they don't want changed:
+
+```python
+# Everything here is a seed — optimizer starts from this program
+# but can change any axis
+seed = Program(
+    module=chain_of_thought,
+    runner=LM("gpt-4o", temperature=0.0),
+    hint="Read the support request carefully. Consider what the customer "
+         "is experiencing and which team can resolve it.",
+)
+
+# Search from the seed, but pin the runner — only explore hint,
+# via fields, temperature, adapter
+results = optimizer.search(
+    intent=triage,
+    seed=seed,
+    pin=["runner"],
+)
+
+# Or pin nothing — let the optimizer change everything, even the
+# module and runner type
+results = optimizer.search(
+    intent=triage,
+    seed=seed,
+)
+
+# Or start from scratch — no seed, everything open
+results = optimizer.search(
+    intent=triage,
+)
+```
+
+A checkpoint is a fully concrete program produced by the optimizer —
+every axis has a specific value, and it can be executed and reproduced.
 
 ### Modules: strategy patterns
 
@@ -252,13 +286,13 @@ an sklearn model, a regex, or a custom Python function. `ensemble` works
 with any combination of inner programs — one could be an LM, another a
 finetuned model, another a rule-based classifier.
 
-### Programs: from partial to fully specified
+### Programs: concrete or seed
 
-A program pins down concrete choices on each axis. The more axes are
-pinned, the more concrete the program is.
+A program specifies concrete values for a module's axes. It can be
+executed directly, or handed to an optimizer as a seed.
 
-**Minimal program — only a runner.** Everything else is auto-generated
-or left at defaults.
+**Simplest program.** Predict with a specific runner, everything else
+auto-generated.
 
 ```python
 simple = Program(
@@ -270,11 +304,8 @@ result = simple(triage, {"support_request": "I was charged twice."})
 # => {"severity": "high", "team": "billing", "customer_visible": True}
 ```
 
-The adapter is auto-generated from the signature's fields and types.
-No hint, no via fields — the LM gets the bare task.
-
-**Pinned strategy and hint, auto adapter.** The user controls the
-decomposition and prompt engineering but lets the adapter be generated.
+**Chain-of-thought with prompt engineering.** The module adds reasoning
+internally. The program specifies the runner and hint.
 
 ```python
 with_reasoning = Program(
@@ -286,10 +317,14 @@ with_reasoning = Program(
 
 result = with_reasoning(triage, {"support_request": "I was charged twice."})
 # => {"severity": "high", "team": "billing", "customer_visible": True}
+
+# This program works as-is. But it also works as a seed:
+# "start here, find something better"
+results = optimizer.search(intent=triage, seed=with_reasoning)
 ```
 
-**Finetuned model, no prompt engineering needed.** The model already
-knows the task — the adapter is trivial or unnecessary.
+**Finetuned model.** The model already knows the task — no hint, no
+reasoning, no prompt engineering needed.
 
 ```python
 finetuned = Program(
@@ -298,24 +333,21 @@ finetuned = Program(
 )
 ```
 
-**Non-LM runner.** An sklearn classifier. No adapter, no hint, no
-reasoning. The runner already speaks in dicts.
+**Non-LM runner.** An sklearn classifier. No adapter, no prompt. The
+runner already speaks in dicts.
 
 ```python
 from_sklearn = Program(
     module=predict,
     runner=SklearnModel("triage_classifier.joblib"),
 )
-
-result = from_sklearn(triage, {"support_request": "I was charged twice."})
-# => {"severity": "high", "team": "billing", "customer_visible": True}
 ```
 
 **Composite programs.** Ensemble and refine compose inner programs, each
-of which can be at a different level of specificity.
+of which can mix different runner types and specificity levels.
 
 ```python
-# Ensemble: vote across a general LM and a finetuned model
+# Ensemble: vote across a general LM, a finetuned LM, and sklearn
 voted = Program(
     module=ensemble,
     programs=[
@@ -538,25 +570,28 @@ The general execution shape:
 - Control flow pattern (single call, loop, retry, vote, tool loop)
 - Decomposition pattern (which hidden fields to add)
 
-### On the program (concrete candidate)
-
-Everything the optimizer pins down for one candidate:
+### On the program (each axis: open, seeded, or pinned)
 
 - Module choice
-- Runner (LM, regex, ML model, code, vision model, etc.)
-- Adapter (can be auto-generated)
+- Runner (from "any LM" to a specific finetuned model to sklearn)
+- Adapter (auto-generated or hand-written)
 - Prompt engineering (hint text, field notes)
 - Runner parameters (temperature, model name, etc.)
 - Control flow parameters (max retries, tool list, etc.)
+
+Each axis is independently open, seeded, or pinned. A program can be
+executed directly (if concrete enough) or handed to an optimizer as a
+seed. A checkpoint is a fully concrete program — every axis has a
+specific value.
 
 ### Teaching order
 
 1. **Specify intent.** Write a Signature with inputs, outputs, types,
    examples, and objective.
 
-2. **Build a program.** Pick a module (strategy pattern), pin down the
-   runner and parameters. Or let the optimizer build and search over
-   candidate programs for you.
+2. **Build a program.** Pick a module, specify values for the axes you
+   know. Run it directly, or hand it to the optimizer as a seed. Pin
+   axes you don't want changed. Leave the rest open or seeded.
 
 3. **Wire a graph** if the task needs multiple steps.
 
@@ -570,8 +605,8 @@ If intent and execution strategy are cleanly separated, an optimizer can:
 
 - Hold the Signature fixed (inputs, outputs, types, examples, objective)
 - Search over modules (predict, chain_of_thought, react, custom)
-- Search over programs within each module (which runner, which adapter,
-  which hidden fields, hint text, field notes, temperature, retries)
+- Search over open and seeded axes (runner, adapter, via fields,
+  hint, notes, temperature, retries — whatever isn't pinned)
 - Evaluate every candidate against the same fixed objective
 
 This only works if the Signature does not contain execution strategy
@@ -615,11 +650,11 @@ based on which module you use. So it belongs on the Signature:
 | Rubrics and metrics | Signature | Scoring criteria — define success |
 | Reference artifacts | Signature | Behavioral anchor |
 | Strategy pattern | Module | Execution shape — control flow, decomposition |
-| Runner (LM, regex, ML, code, etc.) | Program | Concrete runner choice |
-| Adapter (prompt rendering, parsing) | Program | Can be auto-generated |
-| Hint text, field notes | Program | Prompt engineering |
-| Hidden intermediate fields | Program (via module) | Decomposition details |
-| Control flow parameters | Program | Retries, tool list, temperature, etc. |
+| Runner | Program (axis) | "any LM" → `LM("gpt-4o")` → `LM("ft:gpt-4o:triage-v3")` → `SklearnModel(...)` |
+| Adapter | Program (axis) | Auto-generated or hand-written |
+| Hint text, field notes | Program (axis) | Auto-generated, optimizer-searched, or pinned |
+| Hidden fields | Program (axis) | Module default or custom |
+| Control flow params | Program (axis) | Retries, tool list, temperature, etc. |
 | Multi-step data flow | Graph (Layer, Model) | Composition of modules |
 | Runtime telemetry | `runtime` parameter | Not a task field |
 
@@ -630,11 +665,11 @@ The honest truth is:
 - **A module defines the strategy pattern.** Chain-of-thought, ReAct,
   ensemble, refine — these are execution shapes. They define control
   flow and decomposition without pinning down specific parameters.
-- **A program is a fully specified candidate.** Module + runner + adapter
-  + hint + via fields + parameters. It can be executed, scored,
-  serialized, and compared. The optimizer produces and evaluates programs.
-  The runner could be an LM, a regex, code, an ML model, a vision model,
-  or any combination.
+- **A program specifies values for a module's axes.** Each axis (runner,
+  adapter, hint, via fields, temperature, etc.) is independently open,
+  seeded, or pinned. A program can be executed directly or handed to an
+  optimizer as a seed. A checkpoint is a fully concrete program. The
+  optimizer produces, evaluates, mutates, and saves programs.
 - **A graph wires multiple modules together.** Each node has a signature
   and a module. The graph handles data flow.
 - **The optimizer test keeps the boundary clean.** If an optimizer would
