@@ -183,148 +183,195 @@ Signature. Generally, if you don't plan to evaluate or optimize over this output
 If Signature is the **what**, Program is the **how**.
 
 A `Program` is the concrete, executable, serializable, optimizable unit
-for one Signature. Like Signature, it is an **immutable builder**. Each
-method returns a new Program. You build up execution strategy the same
-way you build up intent — one step at a time.
+for one Signature.
 
 ### Core shape
 
-A Program starts from a module and a runner — the two essential
-bindings. Everything else is layered on with builder methods:
+A Program composes a configured module and a configured runner:
 
 ```python
-program = (
-    Program(chain_of_thought, OpenAILM("gpt-4o", temperature=0.0))
-    .hint("Read carefully and reason step by step.")
-    .via("reasoning", note="Internal analysis")
+program = Program(
+    predict.hint("Read carefully.").via("reasoning"),
+    OpenAILM("gpt-4o").temperature(0.0).adapter(XMLAdapter()),
 )
 
 result = program(triage, {"support_request": "I was charged twice."})
 ```
 
-The constructor takes two positional arguments:
-- **module** — the strategy pattern
-- **runner** — the execution engine
+That is it. The constructor takes two arguments:
+- a **module** (possibly configured with builder methods)
+- a **runner** (possibly configured with builder methods or constructor
+  args)
 
-Builder methods configure the strategy:
-- `.hint(text)` — prompt-level guidance
-- `.via(name, *, note=None, type_=str)` — add hidden decomposition
-- `.note(**field_notes)` — per-field prompt descriptions
-- `.tools(tool_list)` — external tools (for react, etc.)
-- `.expose(*names)` — surface trace fields as graph symbols
-- `.adapter(adapter)` — override the default I/O bridge
-- `.set(**config)` — generic escape hatch for module-specific params
+### Every component is its own builder
 
-Each returns a new immutable Program.
+There are three kinds of configuration in an execution strategy. Each
+belongs to the object it configures:
 
-### Why this shape
-
-The flat-constructor version puts everything at the same level:
+**Module config** — the strategy pattern's own parameters. Different
+module types expose different builder methods:
 
 ```python
-# BAD: adapter, hint, via look like peers of module and runner
-Program(
-    module=chain_of_thought,
-    runner=OpenAILM("gpt-4o", temperature=0.0),
-    adapter="auto",
-    hint="Read carefully and reason step by step.",
-    via=[("reasoning", {"note": "Internal analysis"})],
-)
+# chain_of_thought knows about: hint, via
+chain_of_thought 
+    .hint("extract taxes form this receipt")
+    .via('number_list',  "list ALL numerical values in this receipt")
+
+# react knows about: hint, via, tools, max_iter
+react.tools([search, calc]).max_iter(5).hint("you task is to X careful about Y")
+
+# refine knows about: check, max_retries
+refine.check(my_validator).max_retries(3)
+
+# predict knows about: hint (and little else)
+predict.hint("Be concise.")
 ```
 
-But these belong to different owners:
-- `module` and `runner` are the core binding
-- `hint`, `via`, `note`, `tools` are module configuration
-- `adapter` is the I/O bridge
-- `temperature` is runner configuration (lives on the runner object)
+**Runner config** — the execution engine's own parameters. Different
+runner types expose different builder methods or constructor args:
 
-The builder pattern makes ownership clear through method names. You do
-not need to know the internal taxonomy — the method name tells you what
-you are configuring.
+```python
+# LM runners know about: model, temperature, max_tokens, adapter, ...
+OpenAILM("gpt-4o", temperature=0.0)
+OpenAILM("gpt-4o").temperature(0.0).max_tokens(4096)
+AnthropicLM("claude-3-5-sonnet", temperature=0.3)
+
+# LM runners also know about adapter — it is their I/O bridge
+OpenAILM("gpt-4o").adapter(XMLAdapter())
+
+# Vision runners know about: weights, conf_thresh, device, ...
+YOLORunner("yolov8x.pt").conf_thresh(0.25).device("cuda")
+
+# ML runners know about: model_path, device, batch_size, ...
+SklearnRunner("classifier.joblib")
+
+# Code runners know about: timeout, sandbox, ...
+PythonRunner(my_function)
+```
+
+**Adapter is a runner concern**, not a Program concern. An LM runner
+needs an adapter to bridge Signature fields to messages. A sklearn
+runner does not need an adapter at all — it already speaks in dicts. So
+`.adapter()` is a method on LM runners, not on Program:
+
+```python
+# Adapter configured on the runner
+OpenAILM("gpt-4o").adapter(XMLAdapter())
+OpenAILM("gpt-4o").adapter(StructuredOutputAdapter())
+
+# Default: auto-generated from signature fields and types
+OpenAILM("gpt-4o")  # adapter="auto" is the default
+
+# Non-LM runners have no adapter concept
+SklearnRunner("model.joblib")  # no .adapter() method exists
+```
+
+### Why this is right
+
+Each object only exposes the methods that make sense for its type:
+
+| You type...                   | IDE shows...                    |
+|-------------------------------|---------------------------------|
+| `chain_of_thought.`           | `hint`, `via`   (with reasoning via pre-specified)                |
+| `react.`                      | `hint`, `via`, `tools`, `max_iter` |
+| `refine.`                     | `check`, `max_retries`          |
+| `predict.`                    | `hint`, `via`                          |
+| `OpenAILM("gpt-4o").`        | `temperature`, `max_tokens`, `adapter`, ... |
+| `YOLORunner("yolov8x.pt").`  | `conf_thresh`, `iou_thresh`, `device`, ... |
+| `SklearnRunner("model.joblib").` | (nothing to configure)       |
+
+No method appears where it does not belong. The type system enforces
+ownership. The IDE guides you.
+
+### Program is thin
+
+Because config lives on the components, Program itself is thin — it
+just composes a module and a runner:
+
+```python
+Program(module, runner)
+```
+
+Program adds a small number of its own methods for things that are
+genuinely about the *binding* (not about any one component):
+
+- `.expose(*names)` — surface trace fields as graph symbols
+- `.module(m)` — swap the module (returns new Program)
+- `.runner(r)` — swap the runner (returns new Program)
+
+That is all. Everything else lives where it belongs.
 
 ### Composition and forking
 
-Because Programs are immutable, you can fork from a shared base:
+Because modules and runners are immutable builders, you can fork and
+compose freely:
 
 ```python
 # Shared strategy, different runners
-strategy = (
-    Program(predict)
-    .hint("You are a helpful assistant")
-    .via("reasoning")
-)
-fast = strategy.runner(OpenAILM("gpt-4o-mini"))
-accurate = strategy.runner(OpenAILM("o1"))
+cot = chain_of_thought.hint("Think step by step.").via("reasoning")
+fast = Program(cot, OpenAILM("gpt-4o-mini"))
+accurate = Program(cot, OpenAILM("o1"))
 
 # Shared runner, different strategies
-base = Program(predict, OpenAILM("gpt-4o", temperature=0.0))
-with_reasoning = base.module(chain_of_thought).hint("Think carefully.")
-with_tools = base.module(react).tools([search, calculator])
+lm = OpenAILM("gpt-4o", temperature=0.0)
+simple = Program(predict, lm)
+reasoned = Program(chain_of_thought.hint("Think carefully."), lm)
+agent = Program(react.tools([search, calculator]), lm)
 
-# Progressive refinement
-v1 = Program(predict, OpenAILM("gpt-4o"))
-v2 = v1.module(chain_of_thought).hint("Reason step by step.")
-v3 = v2.via("evidence", note="Supporting facts").hint("Cite evidence.")
+# Progressive refinement of a module
+v1 = chain_of_thought.hint("Think step by step.")
+v2 = v1.via("evidence", note="Supporting facts")
+v3 = v2.hint("Cite evidence, then answer.")  # replaces the hint
+
+# Compose into Programs
+prog_v1 = Program(v1, lm)
+prog_v3 = Program(v3, lm)
 ```
 
 This mirrors how Signature authoring works:
 
 ```python
-v1 = Signature("question -> answer")
-v2 = v1.type(answer=str).examples([...])
-v3 = v2.objective("Score correctness from 0 to 1.")
+# Intent builder
+sig = Signature("question -> answer").type(answer=str).examples([...])
+
+# Strategy builder
+mod = chain_of_thought.hint("Think step by step.").via("reasoning")
+run = OpenAILM("gpt-4o", temperature=0.0)
+
+# Compose
+program = Program(mod, run)
+result = program(sig, {"question": "What is 2+2?"})
 ```
 
-Two immutable builders — one for intent, one for strategy — with the
-same feel.
+Three immutable builders — Signature, module, runner — each configured
+with its own type-aware methods. Program composes two of them.
 
 ### Partial Programs
 
 A Program without a runner is a **partial Program** — a reusable
-strategy template that becomes executable when a runner is bound:
+binding of module-to-intent that becomes executable when a runner is
+bound:
 
 ```python
-careful_cot = (
-    Program(chain_of_thought)
-    .hint("Think step by step.")
-    .via("reasoning", note="Show your work")
-)
+strategy = Program(chain_of_thought.hint("Think carefully.").via("reasoning"))
 
-# Bind to different runners for different contexts
-for_triage = careful_cot.runner(OpenAILM("gpt-4o", temperature=0.0))
-for_research = careful_cot.runner(AnthropicLM("claude-3-5-sonnet"))
+# Bind to different runners
+for_triage = strategy.runner(OpenAILM("gpt-4o", temperature=0.0))
+for_research = strategy.runner(AnthropicLM("claude-3-5-sonnet"))
 ```
 
 A Program without a module defaults to `predict`.
-
-### The `.runner()` and `.module()` methods
-
-These swap the core bindings:
-
-```python
-program = Program(predict, OpenAILM("gpt-4o"))
-upgraded = program.module(chain_of_thought)   # new module, same runner
-swapped = program.runner(AnthropicLM("claude-3-5-sonnet"))  # new runner, same module
-```
-
-Runner configuration lives on the runner object itself — not on Program:
-
-```python
-# Runner config is the runner's own concern
-runner = OpenAILM("gpt-4o", temperature=0.0, max_tokens=4096)
-program = Program(chain_of_thought, runner)
-```
 
 ### Why Program exists as a first-class object
 
 `functools.partial` is not enough.
 A Program earns its place because it is:
-- **immutable** — builder methods return new Programs, safe to fork
+- **thin** — just module + runner, not a bag of unrelated config
 - **executable** — `program(sig, inputs) -> Result`
 - **serializable** — `dump_state()` / `load_state()` for checkpoints
-- **introspectable** — `.axes()` for optimizer and debugging
+- **introspectable** — `.axes()` merges module and runner axes
 - **searchable** — the optimizer produces and compares Programs
-- **composable** — fork, layer, specialize from a base
+- **composable** — swap module or runner, fork from a base
 
 The optimizer produces Programs.
 Humans author Programs.
@@ -333,8 +380,8 @@ Models are built from Programs.
 ### One clean story
 
 > I write a **Signature** for what I want.
-> I build a **Program** for how to get it.
-> I run the Program.
+> I configure a **module** and a **runner** for how to get it.
+> I compose them into a **Program** and run it.
 
 That is the basic unit of Onux.
 
@@ -342,60 +389,80 @@ That is the basic unit of Onux.
 
 ## 4. Module is the strategy pattern
 
-A `Module` is not the concrete executable object.
-It is the general execution pattern.
+A Module is the general execution pattern, and it is its own immutable
+builder.
 
-Examples:
-- `predict`
-- `chain_of_thought`
-- `react`
-- `refine`
-- `ensemble`
-- `fallback`
-- `pipe`
-- domain-specific modules like tiling, calibration, or cascades
+### Module types
 
-A Module becomes executable when bound inside a Program.
-
-### Module contract
-A module is a callable with a minimal, explicit contract:
+Each module type is a builder that knows its own configurable axes:
 
 ```python
-def module(sig, inputs, *, runner, adapter, **config) -> Result:
+# LM strategy modules
+predict                                           # single call
+predict.hint("Be concise.")                       # with guidance
+
+chain_of_thought                                  # adds reasoning
+chain_of_thought.hint("Think step by step.")      # with guidance
+chain_of_thought.via("reasoning")                 # explicit decomposition
+chain_of_thought.via("reasoning").via("evidence")  # multiple hidden fields
+
+react                                             # tool loop
+react.tools([search, calc])                       # with tools
+react.tools([search]).max_iter(5)                 # with iteration limit
+react.tools([search]).hint("Use tools wisely.")   # with guidance
+
+refine                                            # validation loop
+refine.check(my_validator)                        # with check function
+refine.check(my_validator).max_retries(3)         # with retry limit
+
+ensemble                                          # multi-program vote
+ensemble.n(5)                                     # sample count
+```
+
+Each builder method returns a new immutable module spec. Only the
+methods that make sense for that module type are available.
+
+### What a module is under the hood
+
+A module has two faces:
+
+1. **A builder / spec** — the immutable configuration object that users
+   construct and that Programs hold. It declares its axes for the
+   optimizer and serializer.
+
+2. **A callable** — the execution implementation. When a Program runs,
+   it calls the module's execution function with the configured
+   parameters:
+
+```python
+def chain_of_thought_fn(sig, inputs, *, runner, adapter, hint=None, via=None) -> Result:
     ...
 ```
 
-Where:
-- `sig` is the pure intent Signature
-- `inputs` is a mapping of input values
-- `runner` is the execution engine
-- `adapter` bridges Signature fields to runner-native I/O
-- `config` carries strategy parameters like `hint`, `via`, `tools`, `max_iter`, etc.
+Users interact with face 1 (the builder). The framework uses face 2
+(the callable) at execution time. The builder carries the config; the
+callable receives it.
 
-### Modules are functions first
-Onux should prefer plain callables over base classes.
-A module may later grow metadata like `.axes()`, but its conceptual core
-is a callable strategy pattern.
+### Modules are broad
 
-### Strategy examples
+Modules are not LLM-specific. Domain-specific modules follow the same
+pattern:
 
-#### Predict
-One call, no extra control flow.
+```python
+# Vision
+tile_and_merge.tile_size(640).overlap(0.2)
+multi_scale.scales([0.5, 1.0, 2.0])
 
-#### Chain of thought
-Add internal reasoning scaffolding, then call the runner.
+# ML
+calibrate.method("isotonic")
+stacking.meta_model(LogisticRegression())
 
-#### ReAct
-Maintain a reasoning/tool loop around the runner.
+# Audio
+chunk_and_transcribe.chunk_seconds(30).overlap(5)
+```
 
-#### Refine
-Validate outputs and retry if necessary.
-
-#### Ensemble
-Run several Programs and aggregate them.
-
-The important thing is that a Module defines **execution shape**, not
-intent.
+Each module type exposes its own axes as builder methods. The pattern is
+always the same.
 
 ---
 
@@ -578,13 +645,13 @@ Signature("question -> reasoning, answer")
 ```
 
 ### 2. Strategy-level decomposition
-If the Program wants to introduce internal scaffolding, it does so with
-builder methods:
+If the module needs internal scaffolding, that is configured on the
+module itself:
 
 ```python
-(
-    Program(chain_of_thought, OpenAILM("gpt-4o"))
-    .via("reasoning", note="Internal reasoning")
+Program(
+    chain_of_thought.via("reasoning", note="Internal reasoning"),
+    OpenAILM("gpt-4o"),
 )
 ```
 
@@ -821,10 +888,9 @@ sig = (
 ### Ring 3: improve execution
 
 ```python
-program = (
-    Program(chain_of_thought, OpenAILM("gpt-4o", temperature=0.0))
-    .hint("Reason carefully before answering.")
-    .via("reasoning")
+program = Program(
+    chain_of_thought.hint("Reason carefully.").via("reasoning"),
+    OpenAILM("gpt-4o", temperature=0.0),
 )
 ```
 

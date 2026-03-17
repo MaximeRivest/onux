@@ -168,99 +168,97 @@ My recommendation:
 - **If optimizer is not shipping early, keep `Program` secondary in v1**.
 - **If optimizer is central, make `Program` explicitly first-class now**.
 
-> ### Answer: Option A — Program is first-class public API, as an immutable builder
+> ### Answer: Option A — Program is first-class, composing typed builders
 >
 > Program is the second noun users learn, right after Signature. It is
 > the concrete, executable, serializable, optimizable binding of
-> strategy to intent. Like Signature, it is an **immutable builder** —
-> each method returns a new Program.
+> strategy to intent.
+>
+> **The key insight: every component is its own immutable builder.**
+>
+> Module config lives on the module. Runner config lives on the runner.
+> Adapter config lives on the runner (adapters are a runner concern).
+> Program just composes them:
 >
 > ```python
-> program = (
->     Program(chain_of_thought, OpenAILM("gpt-4o", temperature=0.0))
->     .hint("Read the support request carefully.")
->     .via("reasoning", note="Step-by-step analysis")
+> program = Program(
+>     chain_of_thought.hint("Read carefully.").via("reasoning"),
+>     OpenAILM("gpt-4o", temperature=0.0),
 > )
 > result = program(signature, inputs)
 > ```
 >
-> **The constructor takes two positional args:**
+> **Each component type exposes only its own methods:**
 >
-> - `module` — the strategy pattern (chain_of_thought, predict, react, …)
-> - `runner` — the execution engine (an LM, an sklearn model, a vision
->   model, a code runner, …)
+> - `chain_of_thought.` → `hint`, `via`
+> - `react.` → `hint`, `via`, `tools`, `max_iter`
+> - `refine.` → `check`, `max_retries`
+> - `OpenAILM("gpt-4o").` → `temperature`, `max_tokens`, `adapter`, …
+> - `YOLORunner("yolov8x.pt").` → `conf_thresh`, `device`, …
+> - `SklearnRunner("model.joblib").` → (nothing)
 >
-> **Builder methods configure the strategy:**
+> No method appears where it does not belong. The IDE guides you.
 >
-> - `.hint(text)` — prompt-level guidance
-> - `.via(name, *, note=None, type_=str)` — add hidden decomposition
-> - `.note(**field_notes)` — per-field prompt descriptions
-> - `.tools(tool_list)` — external tools (for react, etc.)
+> **Program itself is thin:**
+>
+> ```python
+> Program(module, runner)
+> ```
+>
+> Program's own methods are only for the binding:
+> - `.module(m)` — swap the module (returns new Program)
+> - `.runner(r)` — swap the runner (returns new Program)
 > - `.expose(*names)` — surface trace fields as graph symbols
-> - `.adapter(adapter)` — override the default I/O bridge
-> - `.module(module)` — swap the strategy pattern
-> - `.runner(runner)` — swap the execution engine
-> - `.set(**config)` — generic escape hatch for module-specific params
->
-> Each returns a new immutable Program.
->
-> **Why a builder, not a flat constructor:**
->
-> The flat constructor puts module config, runner config, and adapter
-> config at the same nesting level — making them look like peers when
-> they belong to different owners. The builder pattern makes ownership
-> clear through method names: `.hint()` is obviously strategy config,
-> `.runner()` obviously swaps the engine, `.adapter()` obviously sets
-> the I/O bridge. Runner config (temperature, max_tokens) stays on the
-> runner object where it belongs.
 >
 > **Composition and forking:**
 >
-> Because Programs are immutable, you can fork from a shared base:
->
 > ```python
 > # Shared strategy, different runners
-> strategy = Program(chain_of_thought).hint("Think step by step.").via("reasoning")
-> fast = strategy.runner(OpenAILM("gpt-4o-mini"))
-> accurate = strategy.runner(OpenAILM("o1"))
+> cot = chain_of_thought.hint("Think step by step.").via("reasoning")
+> fast = Program(cot, OpenAILM("gpt-4o-mini"))
+> accurate = Program(cot, OpenAILM("o1"))
 >
-> # Progressive refinement
-> v1 = Program(predict, OpenAILM("gpt-4o"))
-> v2 = v1.module(chain_of_thought).hint("Reason step by step.")
-> v3 = v2.via("evidence", note="Supporting facts")
+> # Shared runner, different strategies
+> lm = OpenAILM("gpt-4o", temperature=0.0)
+> simple = Program(predict, lm)
+> reasoned = Program(chain_of_thought.hint("Think carefully."), lm)
+> agent = Program(react.tools([search, calculator]), lm)
+>
+> # Progressive refinement of a module
+> v1 = chain_of_thought.hint("Think step by step.")
+> v2 = v1.via("evidence", note="Supporting facts")
+> v3 = v2.hint("Cite evidence, then answer.")
 > ```
 >
-> This mirrors Signature authoring exactly: two immutable builders, one
-> for intent, one for strategy, with the same feel.
+> Three immutable builders — Signature, module, runner — each with
+> type-aware methods. Program composes two of them.
+>
+> **Adapter is a runner concern:**
+>
+> An LM runner needs an adapter. An sklearn runner does not. So
+> `.adapter()` is a method on LM runners, not on Program:
+>
+> ```python
+> OpenAILM("gpt-4o").adapter(XMLAdapter())  # LM runner has .adapter()
+> SklearnRunner("model.joblib")             # no .adapter() — not needed
+> ```
 >
 > **Partial Programs:**
 >
-> A Program without a runner is a reusable strategy template:
->
 > ```python
-> careful_cot = Program(chain_of_thought).hint("Think carefully.").via("reasoning")
-> for_triage = careful_cot.runner(OpenAILM("gpt-4o", temperature=0.0))
-> for_research = careful_cot.runner(AnthropicLM("claude-3-5-sonnet"))
+> strategy = Program(chain_of_thought.hint("Think carefully.").via("reasoning"))
+> for_triage = strategy.runner(OpenAILM("gpt-4o", temperature=0.0))
+> for_research = strategy.runner(AnthropicLM("claude-3-5-sonnet"))
 > ```
->
-> A Program without a module defaults to `predict`.
 >
 > **What Program is:**
 >
-> - Immutable — builder methods return new Programs, safe to fork
+> - Thin — just module + runner, not a bag of unrelated config
 > - Callable: `program(sig, inputs) -> Result`
 > - Serializable: `dump_state()` / `load_state()` for checkpoints
-> - Introspectable: `.axes()` returns the combined axis map
+> - Introspectable: `.axes()` merges module and runner axes
 > - The unit of search for the optimizer
 > - The unit of execution for a single task
->
-> **What Program is not:**
->
-> - Not a replacement for Signature. Signature says *what*. Program says
->   *how*.
-> - Not a deep class hierarchy. One `Program` class. Different modules,
->   runners, and adapters are composed in, not subclassed.
-> - Not opaque. Every parameter is inspectable and serializable.
 >
 > **A fully-pinned Program is a Checkpoint:**
 >
