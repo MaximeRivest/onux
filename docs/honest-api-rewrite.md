@@ -31,7 +31,7 @@ The core idea is simple:
 That gives us three primary concepts:
 - **Signature** — the intent
 - **Program** — the execution of one task
-- **Model** — the composition of many tasks
+- **Graph** — the composition of many tasks
 
 Everything else supports those three.
 
@@ -411,7 +411,7 @@ A Program earns its place because it is:
 
 The optimizer produces Programs.
 Humans author Programs.
-Models are built from Programs.
+Graphs are built from Programs.
 
 ### One clean story
 
@@ -420,6 +420,47 @@ Models are built from Programs.
 > I compose them into a **Program** and run it.
 
 That is the basic unit of Onux.
+
+### Execution lifecycle
+
+The runtime story should be explicit. When you call:
+
+```python
+result = program(sig, inputs)
+```
+
+it does the following:
+
+1. **Validate inputs against the Signature**
+   - required input fields are present
+   - values are type-checked or coerced if the runtime supports coercion
+
+2. **Resolve execution components**
+   - module: `program.module` or default `predict`
+   - runner: must be bound for execution
+   - adapter: if the runner family requires one, use the configured adapter or resolve `adapter="auto"`
+
+3. **Check compatibility**
+   - the module must support the runner family
+   - otherwise execution fails with a clear compatibility error
+
+4. **Execute the module**
+   - the module owns the strategy
+   - it may call the runner once or many times
+   - it may collect hidden decomposition artifacts and usage along the way
+
+5. **Validate public outputs against the Signature**
+   - all declared output fields are present
+   - output values satisfy the Signature contract
+
+6. **Return a `Result`**
+   - `outputs` contains only public Signature outputs
+   - `trace` contains hidden artifacts and operational evidence
+   - `usage` aggregates telemetry across the full Program run
+
+This is the key boundary: the **module orchestrates execution**, the
+**runner performs native calls**, and the **adapter translates I/O when
+needed**.
 
 ---
 
@@ -622,14 +663,175 @@ pressure proves it necessary.
 Adapters are a public extension point, but not the emotional center of
 the library.
 
+
 ---
 
-## 7. Result is richer than a dict
+## 7. Execution contracts are explicit
+
+The architecture should not only separate intent from strategy. It
+should also say exactly what gets called, in what order, and with what
+guarantees.
+
+### Program contract
+
+A `Program` is executable if:
+- it has a bound runner
+- its module supports that runner family
+- an adapter can be resolved when that runner family requires one
+
+Its public contract is small:
+
+```python
+class Program(Protocol):
+    def __call__(self, sig: Signature, inputs: dict[str, Any]) -> Result: ...
+    def module(self, m: ModuleSpec) -> "Program": ...
+    def runner(self, r: Runner) -> "Program": ...
+    def expose(self, *names: str) -> "Program": ...
+    def axes(self) -> dict[str, Axis]: ...
+    def dump_state(self) -> dict[str, Any]: ...
+```
+
+Program owns the binding. It does **not** own prompt wording, adapter
+configuration, or runner-specific tuning. Those stay on the objects they
+configure.
+
+### Module contract
+
+A module has two jobs:
+- expose an immutable builder/spec for configuration
+- execute a strategy against a compatible runner
+
+```python
+class ModuleSpec(Protocol):
+    def axes(self) -> dict[str, Axis]: ...
+    def config(self) -> dict[str, Any]: ...
+    def supports(self, runner: Runner) -> bool: ...
+    def execute(
+        self,
+        sig: Signature,
+        inputs: dict[str, Any],
+        *,
+        runner: Runner,
+        adapter: Adapter | None,
+        context: ExecutionContext,
+    ) -> ExecResult: ...
+
+
+@dataclass
+class ExecResult:
+    outputs: dict[str, Any]
+    trace: dict[str, Any] | None = None
+    usage: Usage | None = None
+```
+
+The module is the execution orchestrator. It decides:
+- whether one runner call happens or many
+- how hidden decomposition is managed
+- what trace is collected
+- how usage is aggregated across calls
+
+The module does **not** redefine the Signature, mutate intent, or own
+runner transport details.
+
+### Runner contract
+
+Every runner has a small universal contract for optimization and
+serialization:
+
+```python
+class Runner(Protocol):
+    family: str
+
+    def axes(self) -> dict[str, Axis]: ...
+    def config(self) -> dict[str, Any]: ...
+    def dump_state(self) -> dict[str, Any]: ...
+```
+
+Actual execution remains family-specific:
+
+```python
+class LMRunner(Runner, Protocol):
+    family: Literal["lm"]
+
+    def complete(self, request: LMRequest, *, context: ExecutionContext) -> RunnerCall[LMResponse]: ...
+
+
+class VisionRunner(Runner, Protocol):
+    family: Literal["vision"]
+
+    def predict(self, request: VisionRequest, *, context: ExecutionContext) -> RunnerCall[VisionResponse]: ...
+
+
+class MLRunner(Runner, Protocol):
+    family: Literal["ml"]
+
+    def predict(self, features: Any, *, context: ExecutionContext) -> RunnerCall[Any]: ...
+
+
+class DeterministicRunner(Runner, Protocol):
+    family: Literal["code"]
+
+    def run(self, inputs: dict[str, Any], *, context: ExecutionContext) -> RunnerCall[Any]: ...
+
+
+@dataclass
+class RunnerCall[T]:
+    output: T
+    usage: Usage | None = None
+    raw: Any | None = None
+```
+
+The distinction should stay sharp:
+- the **runner** performs one native execution step
+- the **module** turns those steps into a strategy
+
+### Adapter resolution
+
+Adapters are resolved by runner family:
+- LM runners usually require one
+- vision or ML runners may use one
+- dict-native or deterministic runners may not need one at all
+
+Resolution rules are simple:
+- if the runner has an explicit adapter, use it
+- otherwise, if the runner supports `adapter="auto"`, resolve a default
+  adapter from the Signature fields and types
+- otherwise, `adapter = None`
+
+An adapter is responsible only for I/O translation:
+- Signature + input dict -> native request
+- native response -> output dict
+
+It is not responsible for decomposition policy, optimization, or graph
+wiring.
+
+### Compatibility and failure
+
+Compatibility should be explicit, not guessed.
+
+Examples:
+- `chain_of_thought` supports LM runners
+- `react` supports LM runners
+- `refine` supports any runner family where repeated execution plus
+  validation makes sense
+- `predict` may support several runner families
+
+Failure should also be explicit:
+- incompatible module/runner pair -> `ProgramCompatibilityError`
+- missing or unresolvable adapter -> `AdapterResolutionError`
+- invalid inputs or outputs against the Signature -> validation error
+
+This keeps execution honest: intent stays fixed, strategy stays
+replaceable, and the runtime contract is concrete.
+
+---
+
+## 8. Result is richer than a dict
 
 A bare dict is too weak.
 Compound systems need outputs, trace, and telemetry.
 
-So Programs and Models return a `Result`.
+So Programs and Graphs return a `Result`.
 
 ```python
 @dataclass
@@ -670,7 +872,7 @@ without polluting the actual task outputs.
 
 ---
 
-## 8. Hidden decomposition belongs to Program, not Signature
+## 9. Hidden decomposition belongs to Program, not Signature
 
 One of the original document’s biggest confusions was hidden fields.
 That should be resolved cleanly.
@@ -731,17 +933,18 @@ This keeps intent, strategy, and runtime evidence separate.
 
 ---
 
-## 9. Model is composition
+## 10. Graph is composition
 
-A `Model` is how many Signatures and Programs become one compound system.
+A `Graph` is how many Signatures and Programs become one compound
+system.
 
-A Model is a graph of nodes.
+A Graph is a graph of nodes.
 Each node has:
 - an inner Signature
 - a bound Program or a way to resolve one
 - symbolic inputs and outputs
 
-### Model is both symbolic and executable
+### Graph is both symbolic and executable
 That dual nature is important.
 
 #### Build phase
@@ -750,15 +953,25 @@ You can inspect wiring, signatures, and structure.
 
 #### Compile phase
 Programs are bound to nodes.
-The system checks executability.
+The system checks executability:
+- each executable node has a Program
+- each Program has a compatible module/runner pair
+- dependencies and symbol bindings are resolvable
 
 #### Run phase
-The graph executes and returns a Result.
+The graph executes in dependency order.
+Each node receives a concrete input dict, returns a `Result`, and writes
+its public outputs back to graph symbols.
+
+The graph then returns a `Result` whose:
+- `outputs` are the selected graph outputs
+- `trace` may include per-node traces and graph-level execution evidence
+- `usage` is aggregated across the full graph run
 
 ### Example
 
 ```python
-from onux import Input, Model
+from onux import Graph, Input
 from onux.layers import Generate, Retrieve, ReAct
 
 question = Input("question")
@@ -768,29 +981,29 @@ sources = Retrieve(top_k=10)(question)
 notes = ReAct("notes", tools=[search_tool])([question, constraints, sources])
 answer = Generate("answer")([question, constraints, notes, sources])
 
-research = Model(
+research = Graph(
     inputs=[question, constraints],
     outputs=answer,
     name="research_pipeline",
 )
 ```
 
-### Model as program-of-programs
-A Model is not separate from the execution story.
+### Graph as graph-of-programs
+A Graph is not separate from the execution story.
 It is a higher-order executable object built from Programs.
 
-That means a Model can also be:
+That means a Graph can also be:
 - serialized
 - evaluated
 - optimized
-- nested inside larger Models
+- nested inside larger Graphs
 - shared as a reusable subgraph
 
 This is how Onux handles decomposition.
 
 ---
 
-## 10. Evaluation is core, not optional decoration
+## 11. Evaluation is core, not optional decoration
 
 Onux is not just for running systems.
 It is for improving them.
@@ -833,7 +1046,7 @@ So evaluation is part of the core architecture, not a future afterthought.
 
 ---
 
-## 11. Optimization and discovery are native goals
+## 12. Optimization and discovery are native goals
 
 Onux is not only for hand-authoring systems.
 It is for searching over them.
@@ -845,7 +1058,7 @@ That means the architecture should support:
 - replacing a prompt-based classifier with classical ML
 - replacing classical ML with deep learning when scale demands it
 - decomposing one task into several smaller tasks
-- recomposing many tasks into one reusable Model
+- recomposing many tasks into one reusable Graph
 
 ### The climb up and down the hill
 This is one of the central product goals.
@@ -862,16 +1075,16 @@ or go the other direction when flexibility is needed.
 
 The Signature stays fixed.
 The Programs change.
-The Model may change.
+The Graph may change.
 The objective judges improvement.
 
 That is what makes the system evolvable.
 
 ### Search unit
-The optimizer searches over Programs and Models.
+The optimizer searches over Programs and Graphs.
 It does not search over Signatures.
 Signatures are the target.
-Programs and Models are candidates.
+Programs and Graphs are candidates.
 
 ### Axes
 Runners, adapters, and modules expose axes.
@@ -883,7 +1096,7 @@ mental model of execution.
 
 ---
 
-## 12. Sharing and serialization matter
+## 13. Sharing and serialization matter
 
 Onux is meant to support building and sharing systems, not just running
 them in one process.
@@ -905,7 +1118,7 @@ Serializable as structured config:
 - adapter type and config
 - strategy configuration
 
-### Model
+### Graph
 Serializable graph structure:
 - nodes
 - edges
@@ -914,7 +1127,7 @@ Serializable graph structure:
 - node-level program bindings
 
 ### Checkpoint
-A fully pinned, evaluated Program or Model plus scores and metadata.
+A fully pinned, evaluated Program or Graph plus scores and metadata.
 
 This is what makes systems:
 - reproducible
@@ -925,7 +1138,7 @@ This is what makes systems:
 
 ---
 
-## 13. Progressive disclosure: the right teaching order
+## 14. Progressive disclosure: the right teaching order
 
 A good API lets both a human and a language model discover complexity
 incrementally.
@@ -963,7 +1176,7 @@ program = Program(
 ### Ring 4: decompose the system
 
 ```python
-model = Model(...)
+graph = Graph(...)
 ```
 
 ### Ring 5: optimize automatically
@@ -977,7 +1190,7 @@ That is the right kind of hill-climbing interface.
 
 ---
 
-## 14. Public backbone
+## 15. Public backbone
 
 A user should leave the first page remembering three nouns:
 
@@ -987,7 +1200,7 @@ What you want.
 ### Program
 How one task runs.
 
-### Model
+### Graph
 How many tasks compose.
 
 Supporting concepts:
@@ -996,14 +1209,14 @@ Supporting concepts:
 - **Adapter** — I/O bridge used by Program
 - **Result** — what execution returns
 - **Judge** — how rubrics are scored
-- **Optimizer** — how Programs and Models are searched
+- **Optimizer** — how Programs and Graphs are searched
 - **Checkpoint** — what gets saved and shared
 
 That is enough structure to be powerful without being muddy.
 
 ---
 
-## 15. What Onux is ultimately for
+## 16. What Onux is ultimately for
 
 Onux is for the full lifecycle of compound AI systems:
 - **building** them
@@ -1020,12 +1233,12 @@ rewriting its intent:
 - from fine-tuned LLM to ML
 - from ML to deterministic code
 - from one monolithic step to many explicit components
-- from many components to a reusable higher-level Model
+- from many components to a reusable higher-level Graph
 
 That is the honest API:
 - **Signature** is the intent.
 - **Program** is the candidate execution.
-- **Model** is the composition.
+- **Graph** is the composition.
 - **Evaluation** decides what is better.
 - **Optimization** searches the space.
 
